@@ -32,11 +32,11 @@
  * Configuration defaults
  * ---------------------------------------------------------------------- */
 #ifndef I2C_SDA
-#  error "I2C_SDA must be defined (nRF52840 raw pin number for SDA)"
+#  define I2C_SDA   999 //default will never work to break compiling
 #endif
 
 #ifndef I2C_SCL
-#  error "I2C_SCL must be defined (nRF52840 raw pin number for SCL)"
+#  define I2C_SCL   999 //default will never work to break compiling
 #endif
 
 #ifndef I2C_MAX_ADDRS

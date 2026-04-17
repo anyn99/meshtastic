@@ -1,7 +1,10 @@
 #include "configuration.h"
 #if defined(ALMEMO_SENSOR_RECEIVER)
-#include "custom/I2CSlaveThread.h"
+#include "custom/AlmemoReceiverModule.h"
 static I2CSlaveThread *i2cSlaveThread;
+#if !defined(ALMEMO_EMULATOR)
+static AlmemoReceiverModule *almemoReceiverModule;
+#endif
 #endif
 #if defined(ALMEMO_EMULATOR)
 #include "custom/EmulatorThread.h"
@@ -1022,6 +1025,9 @@ void setup()
 
 #if defined(ALMEMO_SENSOR_RECEIVER)
     i2cSlaveThread = new I2CSlaveThread();
+#if !defined(ALMEMO_EMULATOR)
+    almemoReceiverModule = new AlmemoReceiverModule(i2cSlaveThread);
+#endif
 #endif
 #if defined(ALMEMO_EMULATOR)
 #if defined(ALMEMO_SENSOR_RECEIVER)

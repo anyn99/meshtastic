@@ -1,37 +1,54 @@
 #pragma once
 
-#include "I2CSlaveThread.h"
 #include "concurrency/OSThread.h"
 #include "configuration.h"
 #include <stdlib.h>
+
+#include "AlmemoPacket.h"
+
+#if defined(ALMEMO_SENSOR_RECEIVER)
+#include "AlmemoReceiverModule.h"
+#else
+#include "MeshService.h"
+#include "NodeDB.h"
+#include "Router.h"
+#include "gps/RTC.h"
+#include <string.h>
+#endif
 
 /**
  * EmulatorThread
  *
  * Generates synthetic sensor readings (temperature + humidity) for testing.
  *
- * Receiver mode (slave != nullptr):
- *   Writes the readings into the I2CSlaveThread register device (0x40) every
- *   second so the ALMEMO master can read them via I2C.
+ * Every second:
+ *   - Broadcasts an AlmemoSensorPacket on mesh channel ALMEMO_CHANNEL_INDEX
+ *     (default: 1) via PRIVATE_APP portnum.
  *
- * Sender / standalone mode (slave == nullptr):
- *   Just logs the values — useful for testing without the I2C slave stack.
+ * Receiver mode (ALMEMO_SENSOR_RECEIVER, slave != nullptr):
+ *   Also writes the readings into the I2CSlaveThread register device (0x40)
+ *   so the ALMEMO master can read them via I2C.
  *
- * Register layout (4 bytes each):
- *   [0] 0x00  — status high  (0x00 0x40 = value valid & current)
- *   [1] 0x40  — status low
- *   [2] value MSB  (16-bit fixed-point, 2 decimal places)
- *   [3] value LSB
- *
- *   reg 0: temperature near 24.00 °C (±0.50 °C random walk)
- *   reg 1: relative humidity near 50.00 %rH (±5.00 % random walk)
+ *   reg 0: temperature  — 4-byte format [0x00 0x40 MSB LSB], fixed-point *100
+ *   reg 1: humidity     — same format
  */
+
+#ifndef ALMEMO_CHANNEL_INDEX
+#define ALMEMO_CHANNEL_INDEX 1
+#endif
+
 class EmulatorThread : public concurrency::OSThread
 {
+#if defined(ALMEMO_SENSOR_RECEIVER)
     I2CSlaveThread *slave;
+#endif
 
   public:
+#if defined(ALMEMO_SENSOR_RECEIVER)
     explicit EmulatorThread(I2CSlaveThread *s = nullptr) : OSThread("Emulator"), slave(s) {}
+#else
+    EmulatorThread() : OSThread("Emulator") {}
+#endif
 
   protected:
     int32_t runOnce() override
@@ -39,6 +56,8 @@ class EmulatorThread : public concurrency::OSThread
         int16_t temp = 2400 + (rand() % 101) - 50;
         int16_t humi = 5000 + (rand() % 1001) - 500;
 
+#if defined(ALMEMO_SENSOR_RECEIVER)
+        /* --- I2C slave registers ----------------------------------------- */
         if (slave) {
             uint8_t datatemp[I2CSlaveThread::REG_MAX] = {
                 0x00,
@@ -56,10 +75,31 @@ class EmulatorThread : public concurrency::OSThread
             };
             slave->writeReg(1, datahumi);
         }
+#else
+        /* --- Mesh packet (sender only) ----------------------------------- */
+        AlmemoSensorPacket pkt;
+        pkt.node_id   = nodeDB->getNodeNum();
+        pkt.timestamp = getTime();
+        pkt.temp      = temp / 100.0f;
+        pkt.humi      = humi / 100.0f;
 
-        LOG_DEBUG("Emulator temp: %d.%02d degC", temp / 100, temp % 100);
-        LOG_DEBUG("Emulator humi: %d.%02d %%rH", humi / 100, humi % 100);
+        static_assert(sizeof(AlmemoSensorPacket) <= sizeof(meshtastic_MeshPacket::decoded.payload.bytes),
+                      "AlmemoSensorPacket too large for MeshPacket payload");
 
-        return 1000; /* next run in 1 s */
+        meshtastic_MeshPacket *p = router->allocForSending();
+        p->to                   = NODENUM_BROADCAST;
+        p->channel              = ALMEMO_CHANNEL_INDEX;
+        p->decoded.portnum      = meshtastic_PortNum_PRIVATE_APP;
+        p->priority             = meshtastic_MeshPacket_Priority_DEFAULT;
+        memcpy(p->decoded.payload.bytes, &pkt, sizeof(pkt));
+        p->decoded.payload.size = sizeof(pkt);
+
+        service->sendToMesh(p, RX_SRC_LOCAL);
+#endif
+
+        LOG_DEBUG("Emulator temp: %d.%02d degC  humi: %d.%02d %%rH",
+                  temp / 100, temp % 100, humi / 100, humi % 100);
+
+        return 13000; /* next run in 13 s */
     }
 };

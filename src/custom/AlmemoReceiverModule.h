@@ -1,8 +1,15 @@
 #pragma once
 
+#include "AlmemoPacket.h"
 #include "concurrency/OSThread.h"
-#include <stdint.h>
+#include "mesh/SinglePortModule.h"
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#ifndef ALMEMO_CHANNEL_INDEX
+#define ALMEMO_CHANNEL_INDEX 1
+#endif
 
 /**
  * I2CSlaveThread
@@ -79,4 +86,66 @@ class I2CSlaveThread : public concurrency::OSThread
 
     static void     onWrite(uint8_t addr, const uint8_t *buf, uint8_t len);
     static uint8_t  onRead (uint8_t addr, uint8_t *buf, uint8_t max_len);
+};
+
+/**
+ * AlmemoReceiverModule
+ *
+ * Listens for AlmemoSensorPacket messages on PRIVATE_APP /
+ * ALMEMO_CHANNEL_INDEX and forwards decoded sensor values into the
+ * I2CSlaveThread register device (0x40):
+ *
+ *   reg 0: temperature  [0x00 0x40 MSB LSB]  fixed-point *100
+ *   reg 1: humidity     [0x00 0x40 MSB LSB]  fixed-point *100
+ *
+ * Self-registers in the global MeshModule list on construction — no
+ * further wiring needed beyond calling new AlmemoReceiverModule(slave).
+ */
+class AlmemoReceiverModule : public SinglePortModule
+{
+    I2CSlaveThread *slave;
+
+  public:
+    explicit AlmemoReceiverModule(I2CSlaveThread *s)
+        : SinglePortModule("AlmemoRx", meshtastic_PortNum_PRIVATE_APP), slave(s) {}
+
+  protected:
+    bool wantPacket(const meshtastic_MeshPacket *p) override
+    {
+        return p->decoded.portnum == ourPortNum && p->channel == ALMEMO_CHANNEL_INDEX;
+    }
+
+    ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override
+    {
+        if (mp.decoded.payload.size != sizeof(AlmemoSensorPacket)) {
+            LOG_WARN("AlmemoRx: unexpected payload size %u (expected %u)",
+                     mp.decoded.payload.size, (unsigned)sizeof(AlmemoSensorPacket));
+            return ProcessMessage::CONTINUE;
+        }
+
+        AlmemoSensorPacket pkt;
+        memcpy(&pkt, mp.decoded.payload.bytes, sizeof(pkt));
+
+        int16_t temp = (int16_t)(pkt.temp * 100.0f);
+        int16_t humi = (int16_t)(pkt.humi * 100.0f);
+
+        uint8_t datatemp[I2CSlaveThread::REG_MAX] = {
+            0x00, 0x40,
+            (uint8_t)((uint16_t)temp >> 8),
+            (uint8_t)((uint16_t)temp & 0xFF),
+        };
+        slave->writeReg(0, datatemp);
+
+        uint8_t datahumi[I2CSlaveThread::REG_MAX] = {
+            0x00, 0x40,
+            (uint8_t)((uint16_t)humi >> 8),
+            (uint8_t)((uint16_t)humi & 0xFF),
+        };
+        slave->writeReg(1, datahumi);
+
+        LOG_INFO("AlmemoRx: node=%08x t=%lu temp=%.2f humi=%.2f",
+                 pkt.node_id, (unsigned long)pkt.timestamp, pkt.temp, pkt.humi);
+
+        return ProcessMessage::CONTINUE;
+    }
 };

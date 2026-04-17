@@ -1,5 +1,5 @@
 #if defined(ALMEMO_SENSOR_RECEIVER)
-#include "I2CSlaveThread.h"
+#include "AlmemoReceiverModule.h"
 #include "configuration.h"
 
 extern "C" {
