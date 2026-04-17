@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Meshtastic firmware — open-source LoRa mesh networking for long-range, low-power communication without internet or cellular infrastructure. Supports text messaging, GPS position sharing, and sensor telemetry over a decentralized mesh.
 
-**Active development target:** `seeed_xiao_nrf52840_custom_slave` (Seeed XIAO nRF52840 with I2C slave interface, set as default env in `platformio.ini`).
+**Active development target:** `xiao_nrf52840_almemo_sensor_receiver` (Seeed XIAO nRF52840 with I2C slave interface, set as default env in `platformio.ini`).
 
 ## Build Commands
 
 ```bash
-# Build the default environment (seeed_xiao_nrf52840_custom_slave)
+# Build the default environment (xiao_nrf52840_almemo_sensor_receiver)
 pio run
 
 # Build a specific target
@@ -22,7 +22,7 @@ pio run -e tbeam -t upload
 
 # Flash nRF52 via DFU over serial (device-specific)
 python ~/.platformio/packages/tool-adafruit-nrfutil/adafruit-nrfutil.py dfu serial \
-  --package .pio/build/seeed_xiao_nrf52840_custom_slave/firmware-seeed_xiao_nrf52840_custom_slave-*.zip \
+  --package .pio/build/xiao_nrf52840_almemo_sensor_receiver/firmware-xiao_nrf52840_almemo_sensor_receiver-*.zip \
   -p /dev/ttyACM0 -b 115200 --singlebank --touch 1200
 
 # Build native Linux version
@@ -97,7 +97,7 @@ The local variant hierarchy for this repo:
 ```
 seeed_xiao_nrf52840_kit          (GPS on D6/D7, I2C off)
   └─ seeed_xiao_nrf52840_kit_i2c (GPS on NFC pins, I2C on D6/D7)
-       └─ seeed_xiao_nrf52840_custom_slave (+ EXCLUDE_I2C + I2C slave on raw pins 43/44)
+       └─ xiao_nrf52840_almemo_sensor_receiver (+ EXCLUDE_I2C + I2C slave on raw pins 43/44)
 ```
 
 ## Coding Conventions
