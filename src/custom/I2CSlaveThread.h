@@ -29,14 +29,14 @@ class I2CSlaveThread : public concurrency::OSThread
   public:
     static constexpr size_t   EEPROM_SIZE = 256;
     static constexpr uint8_t  REG_COUNT   = 4;
-    static constexpr size_t   REG_MAX     = 32; // max bytes per register
+    static constexpr size_t   REG_MAX     = 4; // bytes per register (always 4)
 
     /* EEPROM contents — index 0 = 0x50, index 1 = 0x51 */
     uint8_t eeprom[2][EEPROM_SIZE];
 
     /* Register device (0x40) — fill before enabling */
     uint8_t reg_data[REG_COUNT][REG_MAX];
-    uint8_t reg_size[REG_COUNT]; // number of valid bytes per register
+    uint8_t reg_size[REG_COUNT]; // number of valid bytes per register (0..4)
 
     I2CSlaveThread();
 
@@ -50,6 +50,15 @@ class I2CSlaveThread : public concurrency::OSThread
      * @param len     Number of bytes to write (clamped to fit)
      */
     void writeEeprom(uint8_t addr, uint8_t offset, const uint8_t *data, uint8_t len);
+
+    /**
+     * Safely write 4 bytes into a register from task context.
+     * Disables the GPIOTE IRQ around the copy so the ISR never sees a torn buffer.
+     *
+     * @param reg   Register index (0..REG_COUNT-1)
+     * @param data  Exactly 4 bytes to write
+     */
+    void writeReg(uint8_t reg, const uint8_t data[REG_MAX]);
 
   protected:
     int32_t runOnce() override;

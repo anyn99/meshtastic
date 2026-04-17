@@ -1,3 +1,5 @@
+#if defined(ALMEMO_SENSOR_RECEIVER)
+
 /**
  * @file  gpiote_dispatch.cpp
  * @brief GPIOTE IN-channel dispatch — replaces WInterrupts.c's half of the story.
@@ -172,3 +174,5 @@ extern "C" void detachInterrupt(uint32_t pin)
         break;
     }
 }
+
+#endif /* ALMEMO_SENSOR_RECEIVER */

@@ -23,7 +23,7 @@
  * pin_release restores INPUT+PULLUP and re-arms SENSE for the next edge.
  */
 
-#include "i2c_slave.h"
+#include "i2c_slave_unused.h"
 
 #include <nrf_gpio.h>
 #include <core_cm4.h>   /* DWT->CYCCNT — Cortex-M4 cycle counter */

@@ -1,7 +1,11 @@
 #include "configuration.h"
-#if defined(SEEED_XIAO_NRF52840_KIT)
+#if defined(ALMEMO_SENSOR_RECEIVER)
 #include "custom/I2CSlaveThread.h"
 static I2CSlaveThread *i2cSlaveThread;
+#endif
+#if defined(ALMEMO_EMULATOR)
+#include "custom/EmulatorThread.h"
+static EmulatorThread *emulatorThread;
 #endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
@@ -1016,8 +1020,15 @@ void setup()
     PowerFSM_setup(); // we will transition to ON in a couple of seconds, FIXME, only do this for cold boots, not waking from SDS
     powerFSMthread = new PowerFSMThread();
 
-#if defined(SEEED_XIAO_NRF52840_KIT)
+#if defined(ALMEMO_SENSOR_RECEIVER)
     i2cSlaveThread = new I2CSlaveThread();
+#endif
+#if defined(ALMEMO_EMULATOR)
+#if defined(ALMEMO_SENSOR_RECEIVER)
+    emulatorThread = new EmulatorThread(i2cSlaveThread);
+#else
+    emulatorThread = new EmulatorThread();
+#endif
 #endif
 
 #if !HAS_TFT

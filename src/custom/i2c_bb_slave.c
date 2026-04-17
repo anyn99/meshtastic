@@ -1,3 +1,5 @@
+#if defined(ALMEMO_SENSOR_RECEIVER)
+
 /**
  * @file  i2c_bb_slave.c
  * @brief Bit-bang I2C slave for nRF52840.
@@ -668,4 +670,6 @@ void GPIOTE_IRQHandler(void)
 {
     i2c_bb_slave_gpiote_irq_handler();
 }
-#endif
+#endif /* I2C_BB_OWN_IRQ */
+
+#endif /* ALMEMO_SENSOR_RECEIVER */

@@ -1,3 +1,4 @@
+#if defined(ALMEMO_SENSOR_RECEIVER)
 #include "I2CSlaveThread.h"
 #include "configuration.h"
 
@@ -175,6 +176,21 @@ void I2CSlaveThread::writeEeprom(uint8_t addr, uint8_t offset, const uint8_t *da
 }
 
 /* -------------------------------------------------------------------------
+ * writeReg — ISR-safe register write from task context
+ * ---------------------------------------------------------------------- */
+
+void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
+{
+    if (reg >= REG_COUNT)
+        return;
+
+    NVIC_DisableIRQ(GPIOTE_IRQn);
+    memcpy(reg_data[reg], data, REG_MAX);
+    reg_size[reg] = REG_MAX;
+    NVIC_EnableIRQ(GPIOTE_IRQn);
+}
+
+/* -------------------------------------------------------------------------
  * Static member definitions
  * ---------------------------------------------------------------------- */
 
@@ -202,9 +218,9 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
      * All four sensor slots default to "empty" (SensorTyp 0xFF = s_sensors[0]).
      * The master can later overwrite individual slots via I2C writes. */
     memcpy(&eeprom[0][0x00], "FHAD46  ", 8);
-    memcpy(&eeprom[0][0xF8], "   6.66 ", 8);
-    initSensorBuffer(&s_sensors[0], &eeprom[0][0x08], DIGITAL_SENSOR_INFO_SIZE);
-    initSensorBuffer(&s_sensors[1], &eeprom[0][0x44], DIGITAL_SENSOR_INFO_SIZE);
+    strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
+    initSensorBuffer(&s_sensors[1], &eeprom[0][0x08], DIGITAL_SENSOR_INFO_SIZE);
+    initSensorBuffer(&s_sensors[2], &eeprom[0][0x44], DIGITAL_SENSOR_INFO_SIZE);
     initSensorBuffer(&s_sensors[0], &eeprom[0][0x80], DIGITAL_SENSOR_INFO_SIZE);
     initSensorBuffer(&s_sensors[0], &eeprom[0][0xBC], DIGITAL_SENSOR_INFO_SIZE);
 
@@ -218,6 +234,7 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     i2c_bb_slave_register(0x50, onWrite, onRead);
     i2c_bb_slave_register(0x51, onWrite, onRead);
     i2c_bb_slave_register(0x40, onWrite, onRead);
+
 }
 
 /* -------------------------------------------------------------------------
@@ -316,10 +333,13 @@ uint8_t I2CSlaveThread::onRead(uint8_t addr, uint8_t *buf, uint8_t max_len)
         if (s_reg_ptr >= REG_COUNT)
             return 0;
         uint8_t sz = s_instance->reg_size[s_reg_ptr];
-        if (sz > max_len) sz = max_len;
+        if (sz > REG_MAX)   sz = REG_MAX;   /* cap at 4 bytes */
+        if (sz > max_len)   sz = max_len;
         memcpy(buf, s_instance->reg_data[s_reg_ptr], sz);
         return sz;
     }
 
     return 0;
 }
+
+#endif /* ALMEMO_SENSOR_RECEIVER */
