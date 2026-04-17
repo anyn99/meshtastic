@@ -1249,9 +1249,11 @@ void menuHandler::positionBaseMenu()
             screen->runNow();
             break;
         case PositionAction::CompassCalibrate:
+#if !MESHTASTIC_EXCLUDE_I2C
             if (accelerometerThread) {
                 accelerometerThread->calibrate(30);
             }
+#endif
             break;
         case PositionAction::GPSSmartPosition:
             menuQueue = GpsSmartPositionMenu;
@@ -1269,11 +1271,15 @@ void menuHandler::positionBaseMenu()
     };
 
     BannerOverlayOptions bannerOptions;
+#if !MESHTASTIC_EXCLUDE_I2C
     if (accelerometerThread) {
         bannerOptions = createStaticBannerOptions("GPS Action", calibrateOptions, calibrateLabels, onSelection);
     } else {
         bannerOptions = createStaticBannerOptions("GPS Action", baseOptions, baseLabels, onSelection);
     }
+#else
+    bannerOptions = createStaticBannerOptions("GPS Action", baseOptions, baseLabels, onSelection);
+#endif
 
     screen->showOverlayBanner(bannerOptions);
 }

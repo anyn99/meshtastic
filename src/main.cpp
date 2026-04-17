@@ -1,4 +1,8 @@
 #include "configuration.h"
+#if defined(SEEED_XIAO_NRF52840_KIT)
+#include "custom/I2CSlaveThread.h"
+static I2CSlaveThread *i2cSlaveThread;
+#endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
@@ -1011,6 +1015,10 @@ void setup()
     // This must be _after_ service.init because we need our preferences loaded from flash to have proper timeout values
     PowerFSM_setup(); // we will transition to ON in a couple of seconds, FIXME, only do this for cold boots, not waking from SDS
     powerFSMthread = new PowerFSMThread();
+
+#if defined(SEEED_XIAO_NRF52840_KIT)
+    i2cSlaveThread = new I2CSlaveThread();
+#endif
 
 #if !HAS_TFT
     setCPUFast(false); // 80MHz is fine for our slow peripherals

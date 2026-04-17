@@ -259,7 +259,7 @@ static const uint8_t SCL = PIN_WIRE_SCL; // Not sure if this is needed
  * because D0 has multiple possible conflicts with various XIAO modules:
  */
 #if defined(SEEED_XIAO_NRF_KIT_I2C)
-#define BUTTON_PIN D0
+//#define BUTTON_PIN D0
 #endif
 
 #if defined(SEEED_XIAO_NRF_WIO_BTB)
