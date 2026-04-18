@@ -117,6 +117,41 @@ uint16_t ScanI2CTwoWire::getRegisterValue(const ScanI2CTwoWire::RegisterLocation
     return value;
 }
 
+// Sensirion CRC-8 (polynomial 0x31, init 0xFF) — used by SHT3x/SHT4x/SHTC3/SCD4x etc.
+static uint8_t sensirion_crc8(const uint8_t *data, size_t len)
+{
+    uint8_t crc = 0xFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (uint8_t b = 0; b < 8; b++) {
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
+        }
+    }
+    return crc;
+}
+
+// Probe SHT4x "Read Serial" (0x89). SHT4x answers with 6 bytes: data[0..1], CRC, data[3..4], CRC.
+// An SHT3x/SHT85 at the same address will ACK arbitrary commands and clock out bytes, but the
+// CRCs won't match — so CRC verification is what actually distinguishes the two families.
+static bool probeSHT4xSerial(ScanI2C::DeviceAddress addr)
+{
+    TwoWire *i2cBus = ScanI2CTwoWire::fetchI2CBus(addr);
+    i2cBus->beginTransmission(addr.address);
+    i2cBus->write((uint8_t)0x89);
+    if (i2cBus->endTransmission() != 0)
+        return false;
+    delay(20);
+    if (i2cBus->requestFrom(addr.address, (uint8_t)6) != 6)
+        return false;
+    uint8_t buf[6] = {0};
+    for (uint8_t i = 0; i < 6; i++) {
+        if (!i2cBus->available())
+            return false;
+        buf[i] = i2cBus->read();
+    }
+    return sensirion_crc8(&buf[0], 2) == buf[2] && sensirion_crc8(&buf[3], 2) == buf[5];
+}
+
 bool ScanI2CTwoWire::i2cCommandResponseLength(ScanI2C::DeviceAddress addr, uint16_t command, uint8_t expectedLength) const
 {
     TwoWire *i2cBus = fetchI2CBus(addr);
@@ -453,7 +488,7 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 if (getRegisterValue(ScanI2CTwoWire::RegisterLocation(addr, 0x7E), 2) == 0x5449) {
                     type = OPT3001;
                     logFoundDevice("OPT3001", (uint8_t)addr.address);
-                } else if (i2cCommandResponseLength(addr, 0x89, 6)) { // SHT4x serial number (6 bytes inc. CRC)
+                } else if (probeSHT4xSerial(addr)) { // SHT4x serial w/ CRC check
                     type = SHT4X;
                     logFoundDevice("SHT4X", (uint8_t)addr.address);
                 } else {
