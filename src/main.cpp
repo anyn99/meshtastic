@@ -10,6 +10,10 @@ static AlmemoReceiverModule *almemoReceiverModule;
 #include "custom/EmulatorThread.h"
 static EmulatorThread *emulatorThread;
 #endif
+#if defined(ALMEMO_SENSOR_SENDER) && !defined(ALMEMO_EMULATOR)
+#include "custom/AlmemoSenderThread.h"
+static AlmemoSenderThread *almemoSenderThread;
+#endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
@@ -1035,6 +1039,9 @@ void setup()
 #else
     emulatorThread = new EmulatorThread();
 #endif
+#endif
+#if defined(ALMEMO_SENSOR_SENDER) && !defined(ALMEMO_EMULATOR)
+    almemoSenderThread = new AlmemoSenderThread();
 #endif
 
 #if !HAS_TFT

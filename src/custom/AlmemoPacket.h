@@ -6,7 +6,7 @@
  * Binary payload for ALMEMO sensor packets (PRIVATE_APP portnum).
  * 16 bytes, little-endian floats.
  *
- * Shared between sender (EmulatorThread / SHT85 reader) and
+ * Shared between sender (AlmemoSenderThread / EmulatorThread) and
  * receiver (AlmemoReceiverModule → I2CSlaveThread).
  */
 struct __attribute__((packed)) AlmemoSensorPacket {
