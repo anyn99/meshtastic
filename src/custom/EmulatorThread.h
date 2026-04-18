@@ -21,9 +21,8 @@
  *
  * Generates synthetic sensor readings (temperature + humidity) for testing.
  *
- * Every second:
- *   - Broadcasts an AlmemoSensorPacket on mesh channel ALMEMO_CHANNEL_INDEX
- *     (default: 1) via PRIVATE_APP portnum.
+ * Broadcasts an AlmemoSensorPacket on mesh channel ALMEMO_CHANNEL_INDEX
+ * (default: 1) via PRIVATE_APP portnum.
  *
  * Receiver mode (ALMEMO_SENSOR_RECEIVER, slave != nullptr):
  *   Also writes the readings into the I2CSlaveThread register device (0x40)
@@ -31,10 +30,17 @@
  *
  *   reg 0: temperature  — 4-byte format [0x00 0x40 MSB LSB], fixed-point *100
  *   reg 1: humidity     — same format
+ *
+ * Interval: hijacks moduleConfig.detection_sensor.state_broadcast_secs so the
+ * rate is editable from the phone app. 0 → EMULATOR_DEFAULT_INTERVAL_MS.
  */
 
 #ifndef ALMEMO_CHANNEL_INDEX
 #define ALMEMO_CHANNEL_INDEX 1
+#endif
+
+#ifndef EMULATOR_DEFAULT_INTERVAL_MS
+#define EMULATOR_DEFAULT_INTERVAL_MS 1500
 #endif
 
 class EmulatorThread : public concurrency::OSThread
@@ -97,9 +103,12 @@ class EmulatorThread : public concurrency::OSThread
         service->sendToMesh(p, RX_SRC_LOCAL);
 #endif
 
-        LOG_DEBUG("Emulator temp: %d.%02d degC  humi: %d.%02d %%rH",
-                  temp / 100, temp % 100, humi / 100, humi % 100);
+        uint32_t intervalSecs = 0; //moduleConfig.detection_sensor.state_broadcast_secs;
+        int32_t  nextMs       = (intervalSecs > 0) ? (int32_t)(intervalSecs * 1000) : EMULATOR_DEFAULT_INTERVAL_MS;
 
-        return 13000; /* next run in 13 s */
+        LOG_DEBUG("Emulator temp: %d.%02d degC  humi: %d.%02d %%rH  next: %d ms",
+                  temp / 100, temp % 100, humi / 100, humi % 100, nextMs);
+
+        return nextMs;
     }
 };

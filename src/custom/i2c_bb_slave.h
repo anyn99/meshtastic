@@ -25,7 +25,7 @@
  * Must be high enough to bit-bang in time, but leave room for SoftDevice if used.
  */
 #ifndef I2C_BB_IRQ_PRIORITY
-#define I2C_BB_IRQ_PRIORITY   3
+#define I2C_BB_IRQ_PRIORITY   2
 #endif
 
 // ─── Types ────────────────────────────────────────────────────────────────────

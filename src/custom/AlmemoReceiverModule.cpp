@@ -56,7 +56,7 @@ bool loopCanSleep()
  *   0x44–0x7F  sensor slot 1    (60 bytes)
  *   0x80–0xBB  sensor slot 2    (60 bytes)
  *   0xBC–0xF7  sensor slot 3    (60 bytes)
- *   0xF8–0xFF  firmware version ("   6.66 ")
+ *   0xF8–0xFF  firmware version ("   6.66")
  * ---------------------------------------------------------------------- */
 
 #define DIGITAL_SENSOR_INFO_SIZE 60u
