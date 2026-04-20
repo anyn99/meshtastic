@@ -45,6 +45,12 @@ class I2CSlaveThread : public concurrency::OSThread
     uint8_t reg_data[REG_COUNT][REG_MAX];
     uint8_t reg_size[REG_COUNT]; // number of valid bytes per register (0..4)
 
+    /* Liveness: AlmemoReceiverModule writes the packet timestamp here after each
+     * register update.  runOnce() compares against prevSeenTimestamp and, if
+     * unchanged since the previous tick, overwrites the data registers with the
+     * ALMEMO "no value" pattern 0x00 0x80 0x00 0x00 to signal a broken link. */
+    volatile uint32_t lastPacketTimestamp = 0;
+
     I2CSlaveThread();
 
     /**
@@ -86,6 +92,10 @@ class I2CSlaveThread : public concurrency::OSThread
 
     static void     onWrite(uint8_t addr, const uint8_t *buf, uint8_t len);
     static uint8_t  onRead (uint8_t addr, uint8_t *buf, uint8_t max_len);
+
+    /* Last packet timestamp seen by runOnce() — compared against
+     * lastPacketTimestamp each tick for the stale-link detector. */
+    uint32_t prevSeenTimestamp = 0;
 };
 
 /**
@@ -142,6 +152,8 @@ class AlmemoReceiverModule : public SinglePortModule
             (uint8_t)((uint16_t)humi & 0xFF),
         };
         slave->writeReg(1, datahumi);
+
+        slave->lastPacketTimestamp = pkt.timestamp;
 
         LOG_INFO("AlmemoRx: node=%08x t=%lu temp=%.2f humi=%.2f",
                  pkt.node_id, (unsigned long)pkt.timestamp, pkt.temp, pkt.humi);

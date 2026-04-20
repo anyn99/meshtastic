@@ -258,6 +258,20 @@ int32_t I2CSlaveThread::runOnce()
         return 0; /* sofort wiederkommen falls noch ein Write anliegt */
     }
 
+    /* Stale-link watchdog: no new AlmemoSensorPacket since last tick → overwrite
+     * temperature and humidity registers with ALMEMO "no value" pattern.
+     * lastPacketTimestamp starts at 0, so before the first packet arrives the
+     * registers are set stale too. */
+    uint32_t cur = lastPacketTimestamp;
+    if (cur == prevSeenTimestamp) {
+        static const uint8_t STALE[REG_MAX] = { 0x00, 0x80, 0x00, 0x00 };
+        writeReg(0, STALE);
+        writeReg(1, STALE);
+        LOG_WARN("AlmemoRx: stale (no new packet since ts=%lu)", (unsigned long)cur);
+    } else {
+        prevSeenTimestamp = cur;
+    }
+
     const volatile uint32_t *p = i2c_bb_slave_stats.scl_periods;
     uint8_t n = i2c_bb_slave_stats.scl_period_idx;
     if (n > I2C_BB_SCL_PERIOD_LOG) n = I2C_BB_SCL_PERIOD_LOG;
@@ -294,6 +308,17 @@ void I2CSlaveThread::onWrite(uint8_t addr, const uint8_t *buf, uint8_t len)
 
 
     if (addr == 0x50 || addr == 0x51) {
+        /* Master is read-only on the EEPROM addresses — only legitimate write is
+         * a single address-pointer byte.  Anything longer is bit-bang glitch
+         * noise that would otherwise corrupt the EEPROM (e.g. invent sensor
+         * slots).  Drop multi-byte writes entirely. */
+        if (len != 1)
+            return;
+        uint8_t idx   = (addr == 0x51) ? 1 : 0;
+        s_eeprom_ptr[idx] = buf[0];
+#if 0
+        /* Full write path — disabled while the master is read-only. Restore
+         * when EEPROM writes from the master are needed again. */
         uint8_t idx   = (addr == 0x51) ? 1 : 0;
         uint8_t start = buf[0];
         s_eeprom_ptr[idx] = start;
@@ -307,6 +332,7 @@ void I2CSlaveThread::onWrite(uint8_t addr, const uint8_t *buf, uint8_t len)
             s_write_pending = true;
             s_instance->setIntervalFromNow(0);
         }
+#endif
     } else if (addr == 0x40) {
         if (buf[0] < REG_COUNT)
             s_reg_ptr = buf[0];
