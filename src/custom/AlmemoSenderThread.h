@@ -92,7 +92,9 @@ class AlmemoSenderThread : public concurrency::OSThread
                       timedOut ? ", tx timeout" : "");
             // skipPreflight=true: we already polled doPreflightSleep ourselves across runOnce calls,
             // so waitEnterSleep's blocking poll-loop (which would deadlock the radio thread) is bypassed.
-            doDeepSleep(sleepMs, true, false);
+            // skipSaveNodeDb=true: sender state is identical across cycles; skipping the multi-file
+            // proto write saves ~1-2s of awake time (and flash wear) per cycle.
+            doDeepSleep(sleepMs, true, true);
             return ALMEMO_SENDER_THREADINTERVAL_MS; // unreached
         }
 
