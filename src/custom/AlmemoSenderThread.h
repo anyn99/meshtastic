@@ -8,6 +8,7 @@
 #include "NodeDB.h"
 #include "Router.h"
 #include "gps/RTC.h"
+#include "sleep.h"
 #include <Adafruit_SHT31.h>
 #include <Wire.h>
 #include <math.h>
@@ -28,8 +29,27 @@
 #define ALMEMO_CHANNEL_INDEX 1
 #endif
 
+// Total cycle time: boot + sensor read + TX + sleep. Deep sleep duration is
+// (ALMEMO_SENDER_INTERVAL_MS - millis() at sleep entry), so the cadence stays
+// constant regardless of how long boot/TX takes.
 #ifndef ALMEMO_SENDER_INTERVAL_MS
-#define ALMEMO_SENDER_INTERVAL_MS 1500
+#define ALMEMO_SENDER_INTERVAL_MS 10000
+#endif
+
+// OSThread poll cadence — used between TX completion checks and as the retry
+// interval when the sensor isn't ready yet. Must be << ALMEMO_SENDER_INTERVAL_MS.
+#ifndef ALMEMO_SENDER_THREADINTERVAL_MS
+#define ALMEMO_SENDER_THREADINTERVAL_MS 50
+#endif
+
+// Hard cap so we never get stuck in the wait-for-TX state if something jams the radio.
+#ifndef ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS
+#define ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS ALMEMO_SENDER_INTERVAL_MS
+#endif
+
+// Floor for the deep-sleep duration if boot+TX took longer than the cycle.
+#ifndef ALMEMO_SENDER_MIN_SLEEP_MS
+#define ALMEMO_SENDER_MIN_SLEEP_MS 100
 #endif
 
 #ifndef ALMEMO_SHT_ADDR
@@ -40,6 +60,13 @@ class AlmemoSenderThread : public concurrency::OSThread
 {
     Adafruit_SHT31 sht;
     bool sensorReady = false;
+    bool waitingForTx = false;
+    uint32_t waitStartMs = 0;
+
+    static bool sensorPowerSaving()
+    {
+        return config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR && config.power.is_power_saving;
+    }
 
   public:
     AlmemoSenderThread() : OSThread("AlmemoSender")
@@ -51,10 +78,28 @@ class AlmemoSenderThread : public concurrency::OSThread
   protected:
     int32_t runOnce() override
     {
+        if (waitingForTx) {
+            bool txDone = doPreflightSleep();
+            bool timedOut = (millis() - waitStartMs) > ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS;
+            if (!txDone && !timedOut)
+                return ALMEMO_SENDER_THREADINTERVAL_MS;
+
+            waitingForTx = false;
+            uint32_t elapsed = millis();
+            uint32_t sleepMs = (elapsed < ALMEMO_SENDER_INTERVAL_MS) ? (ALMEMO_SENDER_INTERVAL_MS - elapsed)
+                                                                     : ALMEMO_SENDER_MIN_SLEEP_MS;
+            LOG_DEBUG("AlmemoSender: deep sleep %ums (cycle=%u, awake=%u%s)", sleepMs, ALMEMO_SENDER_INTERVAL_MS, elapsed,
+                      timedOut ? ", tx timeout" : "");
+            // skipPreflight=true: we already polled doPreflightSleep ourselves across runOnce calls,
+            // so waitEnterSleep's blocking poll-loop (which would deadlock the radio thread) is bypassed.
+            doDeepSleep(sleepMs, true, false);
+            return ALMEMO_SENDER_THREADINTERVAL_MS; // unreached
+        }
+
         if (!sensorReady) {
             sensorReady = sht.begin(ALMEMO_SHT_ADDR);
             if (!sensorReady)
-                return ALMEMO_SENDER_INTERVAL_MS;
+                return ALMEMO_SENDER_THREADINTERVAL_MS;
             LOG_INFO("AlmemoSender: SHT @0x%02x ready (retry)", ALMEMO_SHT_ADDR);
         }
 
@@ -62,7 +107,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         float h = sht.readHumidity();
         if (isnan(t) || isnan(h)) {
             LOG_WARN("AlmemoSender: SHT read NaN, skip");
-            return ALMEMO_SENDER_INTERVAL_MS;
+            return ALMEMO_SENDER_THREADINTERVAL_MS;
         }
 
         AlmemoSensorPacket pkt;
@@ -85,6 +130,12 @@ class AlmemoSenderThread : public concurrency::OSThread
         service->sendToMesh(p, RX_SRC_LOCAL);
 
         LOG_DEBUG("AlmemoSender temp: %.2f degC  humi: %.2f %%rH", t, h);
+
+        if (sensorPowerSaving()) {
+            waitingForTx = true;
+            waitStartMs = millis();
+            return ALMEMO_SENDER_THREADINTERVAL_MS;
+        }
         return ALMEMO_SENDER_INTERVAL_MS;
     }
 };
