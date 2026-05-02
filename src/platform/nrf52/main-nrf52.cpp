@@ -407,6 +407,18 @@ void nrf52Setup()
 
     r = nrfx_wdt_channel_alloc(&nrfx_wdt, &nrfx_wdt_channel_id_nrf52_main);
     assert(r == NRFX_SUCCESS);
+
+#ifdef NRF52_USE_DCDC
+    // Switch the chip's INTERNAL VDD→1.3V regulator (REG1) from LDO to DCDC.
+    // Requires the L1 inductor between DCC and VDD on the PCB — opt in per variant.
+    if (useSoftDevice) {
+        uint32_t err = sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
+        LOG_INFO("Enable DCDC (REG1): err=%u", err);
+    } else {
+        NRF_POWER->DCDCEN = 1;
+        LOG_INFO("Enable DCDC (REG1) via direct register");
+    }
+#endif
 }
 
 void cpuDeepSleep(uint32_t msecToWake)
