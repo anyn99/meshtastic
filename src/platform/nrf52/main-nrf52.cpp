@@ -411,12 +411,18 @@ void nrf52Setup()
 #ifdef NRF52_USE_DCDC
     // Switch the chip's INTERNAL VDD→1.3V regulator (REG1) from LDO to DCDC.
     // Requires the L1 inductor between DCC and VDD on the PCB — opt in per variant.
-    if (useSoftDevice) {
-        uint32_t err = sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
-        LOG_INFO("Enable DCDC (REG1): err=%u", err);
-    } else {
-        NRF_POWER->DCDCEN = 1;
-        LOG_INFO("Enable DCDC (REG1) via direct register");
+    // useSoftDevice is a compile-time default; check the actual runtime state,
+    // since SD-less builds (BLE excluded) leave SVC calls as silent no-ops (err=2).
+    {
+        uint8_t sdEn = 0;
+        sd_softdevice_is_enabled(&sdEn);
+        if (sdEn) {
+            uint32_t err = sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
+            LOG_INFO("Enable DCDC (REG1) via SD: err=%u", err);
+        } else {
+            NRF_POWER->DCDCEN = 1;
+            LOG_INFO("Enable DCDC (REG1) via direct register (SD off)");
+        }
     }
 #endif
 }
