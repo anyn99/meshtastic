@@ -535,21 +535,22 @@ void hfclk_dbg_post_sleep(uint32_t /*idleTicks*/)
 // Pin map per variant.cpp: SCK=P0.21 CSN=P0.25 IO0=P0.20 IO1=P0.24 IO2=P0.22 IO3=P0.23
 static void xiaoQspiFlashDpd()
 {
-    LOG_INFO("XIAO QSPI flash: pre HFCLKSTAT=0x%08x ENABLE=%u",
-             (unsigned)NRF_CLOCK->HFCLKSTAT, (unsigned)NRF_QSPI->ENABLE);
+    //LOG_INFO("XIAO QSPI flash: pre HFCLKSTAT=0x%08x ENABLE=%u",
+    //         (unsigned)NRF_CLOCK->HFCLKSTAT, (unsigned)NRF_QSPI->ENABLE);
 
     // Some Adafruit BSP boot paths leave QSPI in a half-initialised state from
     // a previous run / framework startup hook. Force a hardware power-cycle of
     // the peripheral via the hidden POWER register (peripheral_base + 0xFFC),
     // a documented Nordic workaround for "peripheral stuck" cases.
-    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
-    __NOP(); __NOP(); __NOP();
-    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
+    //*(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
+    //__NOP(); __NOP(); __NOP();
+    //*(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
 
     // QSPI activation needs HFCLK from HFXO. With SoftDevice off and BLE/radio
     // not yet up at this point in boot, only the 16 MHz HFINT runs — QSPI never
     // becomes ready and nrfx_qspi_init returns NRFX_ERROR_TIMEOUT (0xBAD0007).
     // Kick HFXO manually, balance with HFCLKSTOP after.
+	/*
     bool hfxoOwned = false;
     if (!(NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_STATE_Msk)) {
         NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
@@ -559,7 +560,7 @@ static void xiaoQspiFlashDpd()
     }
     LOG_INFO("XIAO QSPI flash: post-HFXO HFCLKSTAT=0x%08x (owned=%d)",
              (unsigned)NRF_CLOCK->HFCLKSTAT, (int)hfxoOwned);
-
+	*/
     // Use the QSPI peripheral's built-in DPM (Deep Power-down Mode) support
     // instead of fighting with raw cinstr. With dpmconfig=true and dpmen=true
     // *before* ACTIVATE, the peripheral knows the flash is currently in DPM
@@ -585,25 +586,25 @@ static void xiaoQspiFlashDpd()
         // to (re-)enter DPD. We could equally use the DEACTIVATE path with
         // DPMEN=1, but explicit cinstr is clearer and avoids state surprises.
         nrfx_err_t cerr = nrfx_qspi_cinstr_quick_send(0xB9, NRF_QSPI_CINSTR_LEN_1B, NULL);
-        nrfx_qspi_uninit();
         LOG_INFO("XIAO QSPI flash: DPD %s", (cerr == NRFX_SUCCESS) ? "sent (cmd 0xB9)" : "send failed");
     } else {
         // Init still failed. Force-disable so a half-initialised peripheral
         // doesn't keep clock requests alive (was the source of the 5 mA floor).
         LOG_WARN("XIAO QSPI flash: nrfx_qspi_init failed (err=0x%x) HFCLKSTAT=0x%08x", (unsigned)err,
                  (unsigned)NRF_CLOCK->HFCLKSTAT);
-        nrfx_qspi_uninit();
-        NRF_QSPI->TASKS_DEACTIVATE = 1;
-        NRF_QSPI->ENABLE = 0;
-        *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
-        __NOP(); __NOP(); __NOP();
-        *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
-        NRF_QSPI->ENABLE = 0;
-        *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
-    }
 
-    if (hfxoOwned)
-        NRF_CLOCK->TASKS_HFCLKSTOP = 1;
+
+    }
+    nrfx_qspi_uninit();
+    NRF_QSPI->TASKS_DEACTIVATE = 1;
+    NRF_QSPI->ENABLE = 0;
+    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
+    __NOP(); __NOP(); __NOP();
+    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
+    NRF_QSPI->ENABLE = 0;
+
+    //if (hfxoOwned)
+    //    NRF_CLOCK->TASKS_HFCLKSTOP = 1;
 
     // After uninit the pins fall back to GPIO with no drive. Pin every QSPI line
     // to a defined level so floating pads don't leak via the input buffer.
@@ -624,14 +625,6 @@ static void xiaoQspiFlashDpd()
     driveOut(22, true);  // IO2 / WP#
     driveOut(23, true);  // IO3 / HOLD#
     driveOut(25, true);  // CSN
-
-    // Hard-power-off the QSPI peripheral block via the hidden POWER register.
-    // nrfx_qspi_uninit only clears ENABLE; the block itself stays powered and
-    // can hold an HFCLK request — measured ~200 µA quiescent contribution from
-    // a stuck-on QSPI block. 0xFFC=0 fully gates it off. Flash chip stays in DPD
-    // regardless because DPD is internal to the flash and persists as long as VCC.
-    NRF_QSPI->ENABLE = 0;
-    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
 }
 #endif
 
@@ -732,15 +725,6 @@ void nrf52Setup()
 
 void cpuDeepSleep(uint32_t msecToWake)
 {
-    // Diag at entry — see what the chip looked like before we started shutting things down.
-    LOG_INFO("DeepSleep diag (entry): HFCLKSTAT=0x%08x USBD.EN=%u DCDCEN=%u USBREG=0x%08x", (unsigned)NRF_CLOCK->HFCLKSTAT,
-             (unsigned)NRF_USBD->ENABLE, (unsigned)NRF_POWER->DCDCEN, (unsigned)NRF_POWER->USBREGSTATUS);
-    // CDC TX is buffered and only drains via the usbd task; without flush+grace
-    // the line gets truncated when Serial.end() kills the CDC stack below.
-    if (Serial) {
-        Serial.flush();
-        delay(10);
-    }
 
     // FIXME, configure RTC or button press to wake us
     // FIXME, power down SPI, I2C, RAMs
@@ -752,20 +736,6 @@ void cpuDeepSleep(uint32_t msecToWake)
     SPI1.end();
 #endif
 
-    // Peripheral state after Wire/SPI shutdown but before Serial.end() — last
-    // chance to log via USB CDC. Any ENABLE=1 here is a suspect for holding HFXO
-    // during the delay() below. ISERx shows which NVIC IRQs are still armed.
-    LOG_INFO("DeepSleep periph: TWIM0=%u TWIM1=%u SPIM2=%u SPIM3=%u UARTE0=%u UARTE1=%u "
-             "USBD=%u SAADC=%u PDM=%u I2S=%u QSPI=%u ISER0=0x%08x ISER1=0x%08x",
-             (unsigned)NRF_TWIM0->ENABLE, (unsigned)NRF_TWIM1->ENABLE, (unsigned)NRF_SPIM2->ENABLE,
-             (unsigned)NRF_SPIM3->ENABLE, (unsigned)NRF_UARTE0->ENABLE, (unsigned)NRF_UARTE1->ENABLE,
-             (unsigned)NRF_USBD->ENABLE, (unsigned)NRF_SAADC->ENABLE, (unsigned)NRF_PDM->ENABLE,
-             (unsigned)NRF_I2S->ENABLE, (unsigned)NRF_QSPI->ENABLE,
-             (unsigned)NVIC->ISER[0], (unsigned)NVIC->ISER[1]);
-    if (Serial) {
-        Serial.flush();
-        delay(5);
-    }
 
     if (Serial)       // Another check in case of disabled default serial, does nothing bad
         Serial.end(); // This may cause crashes as debug messages continue to flow.

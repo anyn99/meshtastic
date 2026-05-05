@@ -45,7 +45,7 @@ extern "C" void hfclk_dbg_irq_dump(void);
 // (ALMEMO_SENDER_INTERVAL_MS - millis() at sleep entry), so the cadence stays
 // constant regardless of how long boot/TX takes.
 #ifndef ALMEMO_SENDER_INTERVAL_MS
-#define ALMEMO_SENDER_INTERVAL_MS 10000
+#define ALMEMO_SENDER_INTERVAL_MS 30000
 #endif
 
 // OSThread poll cadence — used between TX completion checks and as the retry
