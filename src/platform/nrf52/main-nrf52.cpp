@@ -599,15 +599,36 @@ static void xiaoQspiFlashDpd()
         __NOP(); __NOP(); __NOP();
         *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
         NRF_QSPI->ENABLE = 0;
+        *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
     }
 
     if (hfxoOwned)
         NRF_CLOCK->TASKS_HFCLKSTOP = 1;
 
-    // After uninit the pins fall back to GPIO with no drive. CSN floating could
-    // be pulled low by noise → flash exits DPD silently. Pin it HIGH explicitly.
-    NRF_P0->PIN_CNF[25] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
-    NRF_P0->OUTSET = (1u << 25);
+    // After uninit the pins fall back to GPIO with no drive. Pin every QSPI line
+    // to a defined level so floating pads don't leak via the input buffer.
+    // SCK=P0.21, CSN=P0.25, IO0=P0.20, IO1=P0.24, IO2=P0.22, IO3=P0.23.
+    // CSN HIGH so flash stays deselected. SCK + IO0 + IO1 LOW (idle/don't-care).
+    // IO2 (WP#) HIGH — write-protect inactive. IO3 (HOLD#/RESET# on Puya) HIGH —
+    // driven LOW would assert reset on some flashes.
+    auto driveOut = [](uint32_t pin, bool high) {
+        NRF_P0->PIN_CNF[pin] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        if (high)
+            NRF_P0->OUTSET = (1u << pin);
+        else
+            NRF_P0->OUTCLR = (1u << pin);
+    };
+    driveOut(21, false); // SCK
+    driveOut(20, false); // IO0
+    driveOut(24, false); // IO1
+    driveOut(22, true);  // IO2 / WP#
+    driveOut(23, true);  // IO3 / HOLD#
+    driveOut(25, true);  // CSN
+
+    // Hard-power-off the QSPI peripheral block via the hidden POWER register.
+    // nrfx_qspi_uninit only clears ENABLE; the block itself stays powered and
+    // can hold clock requests / quiescent current. 0xFFC=0 fully gates it off.
+
 }
 #endif
 
@@ -718,7 +739,6 @@ void cpuDeepSleep(uint32_t msecToWake)
         delay(10);
     }
 
-
     // FIXME, configure RTC or button press to wake us
     // FIXME, power down SPI, I2C, RAMs
 #if HAS_WIRE
@@ -799,6 +819,31 @@ void cpuDeepSleep(uint32_t msecToWake)
         digitalWrite(SX126X_RXEN, LOW);
 #endif
 
+        // After SPI.end() the SCK/MOSI/MISO pins fall back to default GPIO (input,
+        // buffer connected, no pull). With the SX126x asleep nothing drives MISO,
+        // so it floats and the input buffer leaks. Drive SCK + MOSI LOW (output)
+        // and disconnect MISO's input buffer entirely (no buffer = no leakage).
+#ifdef PIN_SPI_SCK
+        {
+            auto driveLow = [](uint32_t arduinoPin) {
+                NRF_GPIO_Type *port = digitalPinToPort(arduinoPin);
+                uint32_t mask = digitalPinToBitMask(arduinoPin);
+                uint32_t idx = __builtin_ctz(mask);
+                port->PIN_CNF[idx] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+                port->OUTCLR = mask;
+            };
+            auto disconnectInput = [](uint32_t arduinoPin) {
+                NRF_GPIO_Type *port = digitalPinToPort(arduinoPin);
+                uint32_t mask = digitalPinToBitMask(arduinoPin);
+                uint32_t idx = __builtin_ctz(mask);
+                port->PIN_CNF[idx] = (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+                                     (GPIO_PIN_CNF_INPUT_Disconnect << GPIO_PIN_CNF_INPUT_Pos);
+            };
+            driveLow(PIN_SPI_SCK);
+            driveLow(PIN_SPI_MOSI);
+            disconnectInput(PIN_SPI_MISO);
+        }
+#endif
 
         // Detach USB pull-up and disable the USBD peripheral so its clocks/regulator
         // stop during the sleep window. Safe because we NVIC_SystemReset() below — the
@@ -823,8 +868,70 @@ void cpuDeepSleep(uint32_t msecToWake)
         NRF_P1->OUTCLR = (1u << 8);
         NRF_P1->PIN_CNF[10] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
         NRF_P1->OUTCLR = (1u << 10);
+        // PDM mic data/clock lines (CLK=P1.00, DATA=P0.16) terminate at the now-
+        // unpowered MSM261D3526H1CPM. CLK is normally driven by the nRF but PDM
+        // is uninitialised here, so it floats. DATA is high-Z from the dead mic.
+        // Drive both LOW.
+        NRF_P1->PIN_CNF[0] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P1->OUTCLR = (1u << 0);
+        NRF_P0->PIN_CNF[16] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P0->OUTCLR = (1u << 16);
+        // The IMU's I2C lines (SCL=P0.27, SDA=P0.07) carry 10k pull-ups to the
+        // IMU's VCC rail. With 6D_PWR LOW that rail is dead and the pull-ups end
+        // up against a floating supply — the lines settle at some intermediate
+        // voltage and the nRF input buffers leak. INT1 (P0.11) is an output from
+        // the unpowered IMU, also high-Z. Drive all three LOW.
+        NRF_P0->PIN_CNF[27] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P0->OUTCLR = (1u << 27);
+        NRF_P0->PIN_CNF[7] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P0->OUTCLR = (1u << 7);
+        NRF_P0->PIN_CNF[11] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P0->OUTCLR = (1u << 11);
 #endif
 
+        // Battery sense divider (BATTERY_PIN tap + ADC_CTRL sink). After the last
+        // battery_adcDisable() the sink sits OUTPUT HIGH (~3.3V) — divider still
+        // leaks ~260 nA against VBAT. Worse, BATTERY_PIN is left as digital INPUT
+        // with the buffer connected; the ~VBAT/3 tap voltage sits in the buffer's
+        // linear region and can draw single-digit µA. Disconnect both input
+        // buffers — the divider node floats up to VBAT, no current anywhere.
+#if defined(BATTERY_PIN) && defined(ADC_CTRL)
+        {
+            auto disconnectInput = [](uint32_t arduinoPin) {
+                NRF_GPIO_Type *port = digitalPinToPort(arduinoPin);
+                uint32_t mask = digitalPinToBitMask(arduinoPin);
+                uint32_t idx = __builtin_ctz(mask);
+                port->PIN_CNF[idx] = (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+                                     (GPIO_PIN_CNF_INPUT_Disconnect << GPIO_PIN_CNF_INPUT_Pos);
+            };
+            disconnectInput(BATTERY_PIN);
+            disconnectInput(ADC_CTRL);
+        }
+#endif
+
+        // BQ25101 charger pins. HICHG (ISET select) is OUTPUT LOW from variant init
+        // — sinking the BQ's internal pull-up costs ~1 µA. EXT_CHRG_DETECT (~CHG)
+        // is an open-drain status output with no external pull-up on the XIAO; the
+        // input buffer leaks while the line floats. Disconnect both — HICHG floats
+        // up via the BQ pull-up (selects 50 mA charge, irrelevant in sleep), and
+        // variant.cpp re-asserts LOW on next boot.
+#if defined(HICHG) || defined(EXT_CHRG_DETECT)
+        {
+            auto disconnectInput = [](uint32_t arduinoPin) {
+                NRF_GPIO_Type *port = digitalPinToPort(arduinoPin);
+                uint32_t mask = digitalPinToBitMask(arduinoPin);
+                uint32_t idx = __builtin_ctz(mask);
+                port->PIN_CNF[idx] = (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+                                     (GPIO_PIN_CNF_INPUT_Disconnect << GPIO_PIN_CNF_INPUT_Pos);
+            };
+#ifdef HICHG
+            disconnectInput(HICHG);
+#endif
+#ifdef EXT_CHRG_DETECT
+            disconnectInput(EXT_CHRG_DETECT);
+#endif
+        }
+#endif
 
         // Cycling USBD won't drop HFXO if nrfx_clock still holds an explicit request.
         // Force-stop HFCLK so we drop to the 16MHz internal RC (or fully off in WFI).
