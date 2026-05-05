@@ -13,6 +13,11 @@
 #include <assert.h>
 #include <ble_gap.h>
 #include <memory.h>
+// nrfx_qspi.h's NRFX_QSPI_DEFAULT_CONFIG macro references this priority symbol,
+// which the Adafruit BSP only declares in nrfx_config.h when Adafruit_SPIFlash
+// is linked — we aren't, so define it here before the include. Value 7 = lowest.
+#define NRFX_QSPI_DEFAULT_CONFIG_IRQ_PRIORITY 7
+#include <nrfx_qspi.h>
 #include <nrfx_wdt.c>
 #include <nrfx_wdt.h>
 #include <stdio.h>
@@ -355,6 +360,257 @@ void nrf52InitSemiHosting()
 }
 #endif
 
+#ifdef HFCLK_DBG_PIN
+// Mirror HFCLKSTAT.STATE on a GPIO so we can see HFXO state during sleep with
+// PPK2/scope. D0 on XIAO = P0.02 (g_ADigitalPinMap[0] = 2).
+//   D0 = HIGH while HFCLKSTAT.STATE = 1 (HFXO running, ~700 µA penalty)
+//   D0 = LOW  while HFCLKSTAT.STATE = 0 (HFINT only, cheap)
+//
+// nRF52 has EVENTS_HFCLKSTARTED but NO matching HFCLKSTOPPED event, so we can't
+// fully track HFXO state in pure hardware (PPI+GPIOTE) — only the rising edge.
+// Instead we replace the FreeRTOS port's WFE polling loop (port_cmsis_systick.c
+// :211 — `do { __WFE(); } while (0 == NVIC->ISPR)`) with our own that re-mirrors
+// HFCLKSTAT after every __WFE() return. That includes phantom event-bus wakes
+// (peripheral EVENTs without an enabled IRQ — invisible to the FreeRTOS loop),
+// so D0 follows HFXO at the granularity of those wake events. configPRE_SLEEP_
+// PROCESSING signals "skip your loop" to FreeRTOS by setting the modifiable
+// idle time to 0.
+//
+// We also accumulate per-IRQ wake counts in a .noinit array that survives
+// NVIC_SystemReset, so the totals build up across sender cycles. The dump is
+// printed at boot via dumpPowerDiag; plugging USB to read it adds at most one
+// USB-loaded cycle's IRQs on top of many no-USB cycles.
+#define HFCLK_DBG_IRQ_COUNT 48
+#define HFCLK_DBG_IRQ_MAGIC 0x6E43514Au // 'IQCn' v2 — bump to force re-init after layout change (added sleep_* mirrors)
+static volatile uint32_t hfclk_irq_counts[HFCLK_DBG_IRQ_COUNT] __attribute__((section(".noinit")));
+static volatile uint32_t hfclk_phantom_wakes __attribute__((section(".noinit")));
+static volatile uint32_t hfclk_total_wakes __attribute__((section(".noinit")));
+static volatile uint32_t hfclk_irq_magic __attribute__((section(".noinit")));
+// Sleep-only mirrors of the above. Updated only while hfclk_sleep_active=true,
+// which cpuDeepSleep flips on right before delay(msecToWake). Lets us separate
+// boot/TX wakes from the actual sleep-window wakes.
+static volatile uint32_t sleep_irq_counts[HFCLK_DBG_IRQ_COUNT] __attribute__((section(".noinit")));
+static volatile uint32_t sleep_phantom_wakes __attribute__((section(".noinit")));
+static volatile uint32_t sleep_total_wakes __attribute__((section(".noinit")));
+// In .bss (auto-zeroed each boot) — sleep window doesn't survive across reset.
+static volatile bool hfclk_sleep_active = false;
+
+extern "C" {
+void hfclk_dbg_init(void)
+{
+    NRF_P0->DIRSET = (1u << HFCLK_DBG_PIN);
+    NRF_P0->OUTCLR = (1u << HFCLK_DBG_PIN);
+}
+void hfclk_dbg_irq_init(void)
+{
+    // Cold-boot only: any non-magic value (uninitialised RAM after power-on, or
+    // we changed the layout) means the array is invalid and must be zeroed.
+    // After NVIC_SystemReset RAM is preserved, so the magic stays valid and the
+    // counters keep accumulating.
+    if (hfclk_irq_magic != HFCLK_DBG_IRQ_MAGIC) {
+        for (uint32_t i = 0; i < HFCLK_DBG_IRQ_COUNT; i++) {
+            hfclk_irq_counts[i] = 0;
+            sleep_irq_counts[i] = 0;
+        }
+        hfclk_phantom_wakes = 0;
+        hfclk_total_wakes = 0;
+        sleep_phantom_wakes = 0;
+        sleep_total_wakes = 0;
+        hfclk_irq_magic = HFCLK_DBG_IRQ_MAGIC;
+    }
+}
+void hfclk_dbg_sleep_mark(int active) { hfclk_sleep_active = (active != 0); }
+static const char *const hfclk_irq_names[HFCLK_DBG_IRQ_COUNT] = {
+    "POWER_CLOCK", "RADIO",   "UARTE0",   "TWIM0_TWIS0", "SPIM1_TWIM1", "NFCT",     "GPIOTE",  "SAADC",
+    "TIMER0",      "TIMER1",  "TIMER2",   "RTC0",        "TEMP",        "RNG",      "ECB",     "CCM_AAR",
+    "WDT",         "RTC1",    "QDEC",     "COMP_LPCOMP", "SWI0_EGU0",   "SWI1_EGU1","SWI2_EGU2","SWI3_EGU3",
+    "SWI4_EGU4",   "SWI5_EGU5","TIMER3",  "TIMER4",      "PWM0",        "PDM",      "RES30",   "RES31",
+    "MWU",         "PWM1",    "PWM2",     "SPIM2_SPIS2", "RTC2",        "I2S",      "FPU",     "USBD",
+    "UARTE1",      "QSPI",    "CRYPTOCELL","RES43",      "RES44",       "PWM3",     "RES46",   "SPIM3"};
+void hfclk_dbg_irq_dump(void)
+{
+    LOG_INFO("WakeIRQ: total=%u phantom=%u  sleep-only: total=%u phantom=%u (magic=0x%08x)",
+             (unsigned)hfclk_total_wakes, (unsigned)hfclk_phantom_wakes,
+             (unsigned)sleep_total_wakes, (unsigned)sleep_phantom_wakes, (unsigned)hfclk_irq_magic);
+    for (uint32_t i = 0; i < HFCLK_DBG_IRQ_COUNT; i++) {
+        if (hfclk_irq_counts[i] || sleep_irq_counts[i])
+            LOG_INFO("  IRQ%2u %-12s total=%u sleep=%u", (unsigned)i, hfclk_irq_names[i],
+                     (unsigned)hfclk_irq_counts[i], (unsigned)sleep_irq_counts[i]);
+    }
+}
+static inline void hfclk_dbg_mirror(void)
+{
+    if (NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_STATE_Msk)
+        NRF_P0->OUTSET = (1u << HFCLK_DBG_PIN);
+    else
+        NRF_P0->OUTCLR = (1u << HFCLK_DBG_PIN);
+}
+// Drop-in replacement for the FreeRTOS WFE polling loop. Pre-conditions match
+// port_cmsis_systick.c: PRIMASK is set, so WFE wakes from event-bus signals OR
+// pending-IRQ bits but no IRQ is dispatched. We sample HFCLKSTAT after every
+// wake and exit only when an NVIC IRQ has actually pended. Per-IRQ + phantom
+// counters are updated each iteration.
+void hfclk_dbg_pre_sleep(uint32_t *pIdleTime)
+{
+    // Clear sticky FPU exception flags (IDC|IXC|UFC|OFC|DZC|IOC) and pending
+    // FPU_IRQn — lazy stacking would otherwise re-pend it inside our WFE loop.
+    __set_FPSCR(__get_FPSCR() & ~0x9Fu);
+    (void)__get_FPSCR();
+    NVIC_ClearPendingIRQ(FPU_IRQn);
+    // USBD pending bit can stick around even after USBD->ENABLE=0; clear once.
+    NVIC_ClearPendingIRQ(USBD_IRQn);
+
+    hfclk_dbg_mirror();
+
+    while (1) {
+        __WFE();
+        hfclk_dbg_mirror();
+        uint32_t i0 = NVIC->ISPR[0];
+        uint32_t i1 = NVIC->ISPR[1];
+        bool s = hfclk_sleep_active;
+        hfclk_total_wakes++;
+        if (s) sleep_total_wakes++;
+        if ((i0 | i1) == 0) {
+            hfclk_phantom_wakes++;
+            if (s) sleep_phantom_wakes++;
+            continue;
+        }
+        for (uint32_t b = 0; b < 32; b++)
+            if (i0 & (1u << b)) {
+                hfclk_irq_counts[b]++;
+                if (s) sleep_irq_counts[b]++;
+            }
+        for (uint32_t b = 0; b < 16; b++)
+            if (i1 & (1u << b)) {
+                hfclk_irq_counts[32 + b]++;
+                if (s) sleep_irq_counts[32 + b]++;
+            }
+        break;
+    }
+
+    // Tell FreeRTOS to skip its own `do{__WFE();}while(...)` — we already slept.
+    *pIdleTime = 0;
+}
+// Re-mirror once more for the post-IRQ state, then OR the pending-IRQ bitmap
+// into GPREGRET2 (survives NVIC_SystemReset for boot-time decoding). Layout:
+//   bit 7 = validity marker
+//   bit 6 = any-other (anything not in the named slots below)
+//   bit 5 = USBD        (IRQ 39, ISPR[1] bit 7)
+//   bit 4 = RTC1        (IRQ 17, ISPR[0] bit 17)
+//   bit 3 = RTC0        (IRQ 11, ISPR[0] bit 11)
+//   bit 2 = TIMER0      (IRQ  8, ISPR[0] bit 8)
+//   bit 1 = GPIOTE      (IRQ  6, ISPR[0] bit 6)
+//   bit 0 = POWER_CLOCK (IRQ  0, ISPR[0] bit 0)
+void hfclk_dbg_post_sleep(uint32_t /*idleTicks*/)
+{
+    hfclk_dbg_mirror();
+
+    uint32_t i0 = NVIC->ISPR[0];
+    uint32_t i1 = NVIC->ISPR[1];
+    uint8_t add = 0x80;
+    if (i0 & (1u << 0)) add |= 0x01;
+    if (i0 & (1u << 6)) add |= 0x02;
+    if (i0 & (1u << 8)) add |= 0x04;
+    if (i0 & (1u << 11)) add |= 0x08;
+    if (i0 & (1u << 17)) add |= 0x10;
+    if (i1 & (1u << 7)) add |= 0x20;
+    uint32_t named0 = (1u << 0) | (1u << 6) | (1u << 8) | (1u << 11) | (1u << 17);
+    uint32_t named1 = (1u << 7);
+    if ((i0 & ~named0) || (i1 & ~named1)) add |= 0x40;
+    NRF_POWER->GPREGRET2 = (uint8_t)(NRF_POWER->GPREGRET2 | add);
+}
+}
+#endif
+
+#ifdef SEEED_XIAO_NRF52840_KIT
+// XIAO BLE Sense carries a P25Q16H QSPI flash that this build doesn't use
+// (EXTERNAL_FLASH_USE_QSPI is commented out in variant.h, Adafruit_SPIFlash isn't
+// linked). Out of reset the chip sits in standby (~5–20 µA). Sending command
+// 0xB9 (Deep Power Down) drops it to ~1 µA, where it stays as long as VCC is
+// applied — across NVIC_SystemReset, only a hardware power-cycle wakes it.
+//
+// Uses Nordic's nrfx_qspi driver directly (it's compiled into the BSP via
+// NRFX_QSPI_ENABLED=1 for nRF52840). This is the same code path Adafruit's
+// Adafruit_FlashTransport_QSPI.begin()/runCommand(0xB9)/end() uses internally.
+// Pin map per variant.cpp: SCK=P0.21 CSN=P0.25 IO0=P0.20 IO1=P0.24 IO2=P0.22 IO3=P0.23
+static void xiaoQspiFlashDpd()
+{
+    LOG_INFO("XIAO QSPI flash: pre HFCLKSTAT=0x%08x ENABLE=%u",
+             (unsigned)NRF_CLOCK->HFCLKSTAT, (unsigned)NRF_QSPI->ENABLE);
+
+    // Some Adafruit BSP boot paths leave QSPI in a half-initialised state from
+    // a previous run / framework startup hook. Force a hardware power-cycle of
+    // the peripheral via the hidden POWER register (peripheral_base + 0xFFC),
+    // a documented Nordic workaround for "peripheral stuck" cases.
+    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
+    __NOP(); __NOP(); __NOP();
+    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
+
+    // QSPI activation needs HFCLK from HFXO. With SoftDevice off and BLE/radio
+    // not yet up at this point in boot, only the 16 MHz HFINT runs — QSPI never
+    // becomes ready and nrfx_qspi_init returns NRFX_ERROR_TIMEOUT (0xBAD0007).
+    // Kick HFXO manually, balance with HFCLKSTOP after.
+    bool hfxoOwned = false;
+    if (!(NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_STATE_Msk)) {
+        NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+        NRF_CLOCK->TASKS_HFCLKSTART = 1;
+        for (uint32_t to = 200000; NRF_CLOCK->EVENTS_HFCLKSTARTED == 0 && to; --to) {}
+        hfxoOwned = true;
+    }
+    LOG_INFO("XIAO QSPI flash: post-HFXO HFCLKSTAT=0x%08x (owned=%d)",
+             (unsigned)NRF_CLOCK->HFCLKSTAT, (int)hfxoOwned);
+
+    // Use the QSPI peripheral's built-in DPM (Deep Power-down Mode) support
+    // instead of fighting with raw cinstr. With dpmconfig=true and dpmen=true
+    // *before* ACTIVATE, the peripheral knows the flash is currently in DPM
+    // and skips any flash probing — ACTIVATE comes up cleanly even when the
+    // last cycle's 0xB9 left the chip asleep (state persists across reset).
+    // After init we transition DPMEN 1→0 → peripheral auto-sends 0xAB (release)
+    // and waits DPMDUR (exit) before any further bus activity.
+    // DPMDUR units are 256×16 MHz cycles = 16 µs per count. P25Q16H tRDP ≤ 30 µs,
+    // 0x10 (256 µs) is a safe over-spec; entry side gets the same.
+    NRF_QSPI->DPMDUR = (0x0010 << 16) | 0x0010;
+    nrfx_qspi_config_t cfg = NRFX_QSPI_DEFAULT_CONFIG(21, 25, 20, 24, 22, 23);
+    cfg.prot_if.dpmconfig = true;
+    cfg.phy_if.dpmen = true; // assume flash IS in DPM until proven otherwise
+    nrfx_err_t err = nrfx_qspi_init(&cfg, NULL, NULL);
+    if (err == NRFX_SUCCESS) {
+        // 1→0 transition: peripheral generates Release-from-DPD (0xAB) and waits
+        // DPMDUR.EXIT before returning to ready.
+        NRF_QSPI->IFCONFIG1 &= ~QSPI_IFCONFIG1_DPMEN_Msk;
+        for (uint32_t to = 5000; to && !NRF_QSPI->EVENTS_READY; --to)
+            delayMicroseconds(10);
+        NRF_QSPI->EVENTS_READY = 0;
+        // Flash is awake (or was awake all along). Send our own 0xB9 via cinstr
+        // to (re-)enter DPD. We could equally use the DEACTIVATE path with
+        // DPMEN=1, but explicit cinstr is clearer and avoids state surprises.
+        nrfx_err_t cerr = nrfx_qspi_cinstr_quick_send(0xB9, NRF_QSPI_CINSTR_LEN_1B, NULL);
+        nrfx_qspi_uninit();
+        LOG_INFO("XIAO QSPI flash: DPD %s", (cerr == NRFX_SUCCESS) ? "sent (cmd 0xB9)" : "send failed");
+    } else {
+        // Init still failed. Force-disable so a half-initialised peripheral
+        // doesn't keep clock requests alive (was the source of the 5 mA floor).
+        LOG_WARN("XIAO QSPI flash: nrfx_qspi_init failed (err=0x%x) HFCLKSTAT=0x%08x", (unsigned)err,
+                 (unsigned)NRF_CLOCK->HFCLKSTAT);
+        nrfx_qspi_uninit();
+        NRF_QSPI->TASKS_DEACTIVATE = 1;
+        NRF_QSPI->ENABLE = 0;
+        *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
+        __NOP(); __NOP(); __NOP();
+        *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
+        NRF_QSPI->ENABLE = 0;
+    }
+
+    if (hfxoOwned)
+        NRF_CLOCK->TASKS_HFCLKSTOP = 1;
+
+    // After uninit the pins fall back to GPIO with no drive. CSN floating could
+    // be pulled low by noise → flash exits DPD silently. Pin it HIGH explicitly.
+    NRF_P0->PIN_CNF[25] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+    NRF_P0->OUTSET = (1u << 25);
+}
+#endif
+
 void nrf52Setup()
 {
 #ifdef ADC_V
@@ -365,6 +621,20 @@ void nrf52Setup()
     // per
     // https://infocenter.nordicsemi.com/index.jsp?topic=%2Fcom.nordic.infocenter.nrf52832.ps.v1.1%2Fpower.html
     LOG_DEBUG("Reset reason: 0x%x", why);
+
+    // Decode accumulated pending-IRQ bitmap from PRE/POST_SLEEP hooks during the
+    // last delay() in cpuDeepSleep. GPREGRET2 survives NVIC_SystemReset; bit 7 is
+    // our validity marker (bootloader clears RESETREAS so we can't trust SREQ).
+    {
+        uint8_t v = (uint8_t)NRF_POWER->GPREGRET2;
+        if (v & 0x80) {
+            LOG_INFO("Pre-reset wake-IRQs: POWER_CLOCK=%u GPIOTE=%u TIMER0=%u RTC0=%u "
+                     "RTC1=%u USBD=%u other=%u (raw=0x%02x)",
+                     !!(v & 0x01), !!(v & 0x02), !!(v & 0x04), !!(v & 0x08),
+                     !!(v & 0x10), !!(v & 0x20), !!(v & 0x40), v);
+            NRF_POWER->GPREGRET2 = 0;
+        }
+    }
 
 #ifdef USE_SEMIHOSTING
     nrf52InitSemiHosting();
@@ -379,6 +649,10 @@ void nrf52Setup()
     auto *bq = new BQ25713();
     if (!bq->setup())
         LOG_ERROR("ERROR! Charge controller init failed");
+#endif
+
+#ifdef SEEED_XIAO_NRF52840_KIT
+    xiaoQspiFlashDpd();
 #endif
 
     // Init random seed
@@ -425,10 +699,26 @@ void nrf52Setup()
         }
     }
 #endif
+
+#ifdef HFCLK_DBG_PIN
+    hfclk_dbg_init();
+    hfclk_dbg_irq_init();
+#endif
 }
 
 void cpuDeepSleep(uint32_t msecToWake)
 {
+    // Diag at entry — see what the chip looked like before we started shutting things down.
+    LOG_INFO("DeepSleep diag (entry): HFCLKSTAT=0x%08x USBD.EN=%u DCDCEN=%u USBREG=0x%08x", (unsigned)NRF_CLOCK->HFCLKSTAT,
+             (unsigned)NRF_USBD->ENABLE, (unsigned)NRF_POWER->DCDCEN, (unsigned)NRF_POWER->USBREGSTATUS);
+    // CDC TX is buffered and only drains via the usbd task; without flush+grace
+    // the line gets truncated when Serial.end() kills the CDC stack below.
+    if (Serial) {
+        Serial.flush();
+        delay(10);
+    }
+
+
     // FIXME, configure RTC or button press to wake us
     // FIXME, power down SPI, I2C, RAMs
 #if HAS_WIRE
@@ -438,6 +728,22 @@ void cpuDeepSleep(uint32_t msecToWake)
 #if SPI_INTERFACES_COUNT > 1
     SPI1.end();
 #endif
+
+    // Peripheral state after Wire/SPI shutdown but before Serial.end() — last
+    // chance to log via USB CDC. Any ENABLE=1 here is a suspect for holding HFXO
+    // during the delay() below. ISERx shows which NVIC IRQs are still armed.
+    LOG_INFO("DeepSleep periph: TWIM0=%u TWIM1=%u SPIM2=%u SPIM3=%u UARTE0=%u UARTE1=%u "
+             "USBD=%u SAADC=%u PDM=%u I2S=%u QSPI=%u ISER0=0x%08x ISER1=0x%08x",
+             (unsigned)NRF_TWIM0->ENABLE, (unsigned)NRF_TWIM1->ENABLE, (unsigned)NRF_SPIM2->ENABLE,
+             (unsigned)NRF_SPIM3->ENABLE, (unsigned)NRF_UARTE0->ENABLE, (unsigned)NRF_UARTE1->ENABLE,
+             (unsigned)NRF_USBD->ENABLE, (unsigned)NRF_SAADC->ENABLE, (unsigned)NRF_PDM->ENABLE,
+             (unsigned)NRF_I2S->ENABLE, (unsigned)NRF_QSPI->ENABLE,
+             (unsigned)NVIC->ISER[0], (unsigned)NVIC->ISER[1]);
+    if (Serial) {
+        Serial.flush();
+        delay(5);
+    }
+
     if (Serial)       // Another check in case of disabled default serial, does nothing bad
         Serial.end(); // This may cause crashes as debug messages continue to flow.
 
@@ -468,7 +774,142 @@ void cpuDeepSleep(uint32_t msecToWake)
         (IS_ONE_OF(config.device.role, meshtastic_Config_DeviceConfig_Role_TRACKER,
                    meshtastic_Config_DeviceConfig_Role_TAK_TRACKER, meshtastic_Config_DeviceConfig_Role_SENSOR) &&
          config.power.is_power_saving == true)) {
-        sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
+        // sd_power_mode_set is SD-managed; with SD off the SVC silently fails
+        // (err=2) and direct POWER register writes would HardFault under SD.
+        // Without SD, trigger TASKS_LOWPWR directly — LOWPWR is the reset
+        // default but some EasyDMA peripherals can implicitly switch to
+        // CONSTLAT, so set it explicitly.
+        uint8_t sdEn = 0;
+        sd_softdevice_is_enabled(&sdEn);
+        if (sdEn)
+            sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
+        else
+            NRF_POWER->TASKS_LOWPWR = 1;
+
+        // Pin SX126x NSS HIGH so the chip stays in its commanded sleep state. After
+        // SPI.end() the pin can float and a transient low pulse drops the chip back
+        // to standby_RC (~600 µA). Same trick the ESP32 branch in sleep.cpp uses.
+#ifdef SX126X_CS
+        pinMode(SX126X_CS, OUTPUT);
+        digitalWrite(SX126X_CS, HIGH);
+#endif
+        // Drive RXEN LOW so the antenna switch / RX frontend bias path is off.
+#ifdef SX126X_RXEN
+        pinMode(SX126X_RXEN, OUTPUT);
+        digitalWrite(SX126X_RXEN, LOW);
+#endif
+
+
+        // Detach USB pull-up and disable the USBD peripheral so its clocks/regulator
+        // stop during the sleep window. Safe because we NVIC_SystemReset() below — the
+        // BSP re-inits USB on next boot.
+        NRF_USBD->USBPULLUP = 0;
+        NRF_USBD->ENABLE = 0;
+        NVIC_DisableIRQ(USBD_IRQn);
+        NVIC_ClearPendingIRQ(USBD_IRQn);
+
+        // Silence CRYPTOCELL: even with NVIC IRQ disabled, SEVONPEND wakes WFE on
+        // every IRQ-line pulse (saw ~54 wakes/cycle in the wake-IRQ counter). The
+        // peripheral was only briefly used by nRFCrypto.begin() at boot for the seed.
+        NRF_CRYPTOCELL->ENABLE = 0;
+        NVIC_ClearPendingIRQ(CRYPTOCELL_IRQn);
+
+#ifdef SEEED_XIAO_NRF52840_KIT
+        // XIAO BLE Sense board carries an LSM6DS3 IMU (6D_PWR=P1.08) and PDM mic
+        // (MIC_PWR=P1.10) whose supply rails are gated by these pins. The BSP
+        // never initialises them, so they float — drive them LOW so the IMU and
+        // mic can't pull any current during the sleep window.
+        NRF_P1->PIN_CNF[8] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P1->OUTCLR = (1u << 8);
+        NRF_P1->PIN_CNF[10] = (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+        NRF_P1->OUTCLR = (1u << 10);
+#endif
+
+
+        // Cycling USBD won't drop HFXO if nrfx_clock still holds an explicit request.
+        // Force-stop HFCLK so we drop to the 16MHz internal RC (or fully off in WFI).
+        NRF_CLOCK->TASKS_HFCLKSTOP = 1;
+#if 0
+        // nRF52 errata workaround: TWIM/SPIM/UARTE/USBD can leave HFCLK + EasyDMA
+        // running even after ENABLE=0 if a transaction wasn't explicitly stopped first.
+        // Each peripheral has a hidden POWER register at offset 0xFFC; writing 0→1
+        // forces a full power-cycle and releases all clock/DMA requests.
+        // Ref: https://devzone.nordicsemi.com/ "UARTE current consumption"
+        auto cyclePower = [](uintptr_t base) {
+            *(volatile uint32_t *)(base + 0xFFC) = 0;
+            (void)*(volatile uint32_t *)(base + 0xFFC);
+            *(volatile uint32_t *)(base + 0xFFC) = 1;
+        };
+        cyclePower(0x40003000); // TWIM0 / SPIM0 / SPIS0 / TWIS0 (shared)
+        cyclePower(0x40004000); // TWIM1 / SPIM1 / SPIS1 / TWIS1 (shared)
+        cyclePower(0x40023000); // SPIM2 / SPIS2
+        cyclePower(0x40002000); // UARTE0
+        cyclePower(0x40028000); // UARTE1
+        cyclePower(0x40027000); // USBD
+
+
+        // Real deep sleep: bypass FreeRTOS entirely. vTaskDelay keeps the scheduler
+        // ticking and every queued wakeup pulls the chip out of WFI — that was the
+        // 800 µA baseline + 7 ms spike pattern. After switching to RTC2+WFE we still
+        // saw 1 ms spikes: with SEVONPEND any *pending* IRQ wakes WFE even with
+        // PRIMASK=1, and FreeRTOS's RTC1 tick was still firing every ~977 µs. So we
+        // must physically stop every other wake source first.
+        __disable_irq();
+
+        // Kill the FreeRTOS tick (RTC1) and all its event/interrupt sources.
+        NRF_RTC1->TASKS_STOP = 1;
+        NRF_RTC1->INTENCLR = 0xFFFFFFFF;
+        NRF_RTC1->EVTENCLR = 0xFFFFFFFF;
+        // Belt-and-suspenders: also stop RTC0 in case anything else owns it.
+        NRF_RTC0->TASKS_STOP = 1;
+        NRF_RTC0->INTENCLR = 0xFFFFFFFF;
+        NRF_RTC0->EVTENCLR = 0xFFFFFFFF;
+
+        // Mask every NVIC IRQ source and clear pending bits, so SEVONPEND won't
+        // wake us on stray events from peripherals we haven't explicitly stopped.
+        for (uint32_t i = 0; i < 8; i++) {
+            NVIC->ICER[i] = 0xFFFFFFFF;
+            NVIC->ICPR[i] = 0xFFFFFFFF;
+        }
+
+        SCB->SCR |= SCB_SCR_SEVONPEND_Msk | SCB_SCR_SLEEPDEEP_Msk;
+
+        // RTC2 runs from LFCLK (32768 Hz, ~0.5 µA), 24-bit counter — for an 8-9 s
+        // sleep window PRESCALER=0 is fine (max ~512 s).
+        NRF_RTC2->TASKS_STOP = 1;
+        NRF_RTC2->TASKS_CLEAR = 1;
+        NRF_RTC2->PRESCALER = 0;
+        uint64_t ticks = ((uint64_t)msecToWake * 32768ULL) / 1000ULL;
+        if (ticks < 2) ticks = 2;            // RTC errata: CC must be ≥ COUNTER+2
+        if (ticks > 0x00FFFFFE) ticks = 0x00FFFFFE;
+        NRF_RTC2->CC[0] = (uint32_t)ticks;
+        NRF_RTC2->EVENTS_COMPARE[0] = 0;
+        NRF_RTC2->INTENSET = RTC_INTENSET_COMPARE0_Msk;
+        NVIC_ClearPendingIRQ(RTC2_IRQn);
+        // Deliberately do NOT NVIC_EnableIRQ — we only want the event to wake WFE,
+        // not to dispatch into an ISR. SEVONPEND makes this work with PRIMASK set.
+
+        NRF_RTC2->TASKS_START = 1;
+
+        while (NRF_RTC2->EVENTS_COMPARE[0] == 0) {
+            __SEV();
+            __WFE(); // clears event flag set by SEV
+            __WFE(); // actually sleeps until COMPARE0 pends RTC2_IRQn
+        }
+
+        NRF_RTC2->TASKS_STOP = 1;
+#endif
+
+        // Reset hook counter to 0 (with validity bit set). The PRE_SLEEP hook
+        // increments it on every invocation during the upcoming delay(). On the
+        // next boot the count reveals how often tickless idle was aborted —
+        // i.e. how often something woke us during the supposed deep sleep.
+        NRF_POWER->GPREGRET2 = 0x80;
+
+#ifdef HFCLK_DBG_PIN
+        extern void hfclk_dbg_sleep_mark(int);
+        hfclk_dbg_sleep_mark(1);
+#endif
         delay(msecToWake);
         NVIC_SystemReset();
     } else {

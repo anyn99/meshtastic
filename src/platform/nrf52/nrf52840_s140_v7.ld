@@ -26,7 +26,7 @@ SECTIONS
     KEEP(*(.svc_data))
     PROVIDE(__stop_svc_data = .);
   } > RAM
-  
+
   .fs_data :
   {
     PROVIDE(__start_fs_data = .);
@@ -34,5 +34,23 @@ SECTIONS
     PROVIDE(__stop_fs_data = .);
   } > RAM
 } INSERT AFTER .data;
+
+/* Variables tagged __attribute__((section(".noinit"))) are placed here.
+ * NOLOAD = no FLASH image, RAM-only. Section is not zeroed by startup
+ * (BSS-init only touches symbols between __bss_start__ and __bss_end__),
+ * so contents survive NVIC_SystemReset as long as power is maintained.
+ * Used for the HFCLK idle-tick histogram so it can be dumped on next boot. */
+SECTIONS
+{
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    PROVIDE(__noinit_start = .);
+    *(.noinit)
+    *(.noinit.*)
+    . = ALIGN(4);
+    PROVIDE(__noinit_end = .);
+  } > RAM
+} INSERT AFTER .bss;
 
 INCLUDE "nrf52_common.ld"
