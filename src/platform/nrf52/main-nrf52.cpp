@@ -614,6 +614,11 @@ void cpuDeepSleep(uint32_t msecToWake)
         // stop during the sleep window. Safe because we NVIC_SystemReset() below — the
         // BSP re-inits USB on next boot.
         NRF_USBD->USBPULLUP = 0;
+        // Power-cycle hidden POWER register before ENABLE=0 — releases any
+        // lingering EasyDMA/clock requests the peripheral might still hold.
+        *(volatile uint32_t *)(NRF_USBD_BASE + 0xFFC) = 0;
+        __NOP(); __NOP(); __NOP();
+        *(volatile uint32_t *)(NRF_USBD_BASE + 0xFFC) = 1;
         NRF_USBD->ENABLE = 0;
         NVIC_DisableIRQ(USBD_IRQn);
         NVIC_ClearPendingIRQ(USBD_IRQn);
@@ -621,6 +626,9 @@ void cpuDeepSleep(uint32_t msecToWake)
         // Silence CRYPTOCELL: even with NVIC IRQ disabled, SEVONPEND wakes WFE on
         // every IRQ-line pulse (saw ~54 wakes/cycle in the wake-IRQ counter). The
         // peripheral was only briefly used by nRFCrypto.begin() at boot for the seed.
+        *(volatile uint32_t *)(NRF_CRYPTOCELL_BASE + 0xFFC) = 0;
+        __NOP(); __NOP(); __NOP();
+        *(volatile uint32_t *)(NRF_CRYPTOCELL_BASE + 0xFFC) = 1;
         NRF_CRYPTOCELL->ENABLE = 0;
         NVIC_ClearPendingIRQ(CRYPTOCELL_IRQn);
 
