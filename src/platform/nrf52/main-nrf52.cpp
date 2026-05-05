@@ -373,32 +373,6 @@ void nrf52InitSemiHosting()
 // Pin map per variant.cpp: SCK=P0.21 CSN=P0.25 IO0=P0.20 IO1=P0.24 IO2=P0.22 IO3=P0.23
 static void xiaoQspiFlashDpd()
 {
-    //LOG_INFO("XIAO QSPI flash: pre HFCLKSTAT=0x%08x ENABLE=%u",
-    //         (unsigned)NRF_CLOCK->HFCLKSTAT, (unsigned)NRF_QSPI->ENABLE);
-
-    // Some Adafruit BSP boot paths leave QSPI in a half-initialised state from
-    // a previous run / framework startup hook. Force a hardware power-cycle of
-    // the peripheral via the hidden POWER register (peripheral_base + 0xFFC),
-    // a documented Nordic workaround for "peripheral stuck" cases.
-    //*(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
-    //__NOP(); __NOP(); __NOP();
-    //*(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
-
-    // QSPI activation needs HFCLK from HFXO. With SoftDevice off and BLE/radio
-    // not yet up at this point in boot, only the 16 MHz HFINT runs — QSPI never
-    // becomes ready and nrfx_qspi_init returns NRFX_ERROR_TIMEOUT (0xBAD0007).
-    // Kick HFXO manually, balance with HFCLKSTOP after.
-	/*
-    bool hfxoOwned = false;
-    if (!(NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_STATE_Msk)) {
-        NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
-        NRF_CLOCK->TASKS_HFCLKSTART = 1;
-        for (uint32_t to = 200000; NRF_CLOCK->EVENTS_HFCLKSTARTED == 0 && to; --to) {}
-        hfxoOwned = true;
-    }
-    LOG_INFO("XIAO QSPI flash: post-HFXO HFCLKSTAT=0x%08x (owned=%d)",
-             (unsigned)NRF_CLOCK->HFCLKSTAT, (int)hfxoOwned);
-	*/
     // Use the QSPI peripheral's built-in DPM (Deep Power-down Mode) support
     // instead of fighting with raw cinstr. With dpmconfig=true and dpmen=true
     // *before* ACTIVATE, the peripheral knows the flash is currently in DPM
@@ -440,9 +414,6 @@ static void xiaoQspiFlashDpd()
     __NOP(); __NOP(); __NOP();
     *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 1;
     NRF_QSPI->ENABLE = 0;
-
-    //if (hfxoOwned)
-    //    NRF_CLOCK->TASKS_HFCLKSTOP = 1;
 
     // After uninit the pins fall back to GPIO with no drive. Pin every QSPI line
     // to a defined level so floating pads don't leak via the input buffer.
@@ -531,11 +502,11 @@ void nrf52Setup()
     uint8_t sdEn = 0;
     sd_softdevice_is_enabled(&sdEn);
     if (sdEn) {
-    	uint32_t err = sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
-    	LOG_INFO("Enable DCDC (REG1) via SD: err=%u", err);
+        uint32_t err = sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
+        LOG_INFO("Enable DCDC (REG1) via SD: err=%u", err);
     } else {
-    	NRF_POWER->DCDCEN = 1;
-    	LOG_INFO("Enable DCDC (REG1) via direct register (SD off)");
+        NRF_POWER->DCDCEN = 1;
+        LOG_INFO("Enable DCDC (REG1) via direct register (SD off)");
     }
 #endif
 

@@ -22,10 +22,6 @@ extern "C" {
 }
 #endif
 
-#ifdef HFCLK_DBG_PIN
-extern "C" void hfclk_dbg_irq_dump(void);
-#endif
-
 /**
  * AlmemoSenderThread
  *
