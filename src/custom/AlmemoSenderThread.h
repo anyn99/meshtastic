@@ -87,71 +87,9 @@ class AlmemoSenderThread : public concurrency::OSThread
         LOG_INFO("AlmemoSender: SHT @0x%02x %s", ALMEMO_SHT_ADDR, sensorReady ? "ready" : "begin() failed");
     }
 
-    void dumpPowerDiag()
-    {
-#ifdef NRF52_SERIES
-        uint8_t sdEn = 0;
-        sd_softdevice_is_enabled(&sdEn);
-        LOG_INFO("PowerDiag: SoftDevice enabled=%u", sdEn);
-
-        // HFCLKSTAT bit 0 = SRC (0=HFINT/RC 16MHz, 1=HFXO crystal),
-        // bit 16 = STATE (0=stopped, 1=running). HFXO running ≈ +700 µA.
-        uint32_t hfStat = NRF_CLOCK->HFCLKSTAT;
-        uint32_t hfRun = NRF_CLOCK->HFCLKRUN;
-        LOG_INFO("PowerDiag: HFCLKSTAT=0x%08x (src=%s, state=%s) HFCLKRUN=0x%08x", (unsigned)hfStat,
-                 (hfStat & CLOCK_HFCLKSTAT_SRC_Msk) ? "HFXO" : "HFINT",
-                 (hfStat & CLOCK_HFCLKSTAT_STATE_Msk) ? "RUN" : "STOP", (unsigned)hfRun);
-        LOG_INFO("PowerDiag: USBD ENABLE=%u USBPULLUP=%u USBREGSTATUS=0x%08x DCDCEN=%u", (unsigned)NRF_USBD->ENABLE,
-                 (unsigned)NRF_USBD->USBPULLUP, (unsigned)NRF_POWER->USBREGSTATUS, (unsigned)NRF_POWER->DCDCEN);
-
-#ifdef HFCLK_DBG_PIN
-        hfclk_dbg_irq_dump();
-#endif
-
-        // ~600 bytes for ~10-15 tasks; enlarge if your build creates more.
-        // RedirectablePrint::printBuf is 160 B on nRF52, so a single multi-line
-        // LOG_INFO(buf) gets truncated. Emit one log line per task instead.
-        static char buf[1024];
-        vTaskList(buf);
-        LOG_INFO("PowerDiag: FreeRTOS tasks (Name State Prio Stack# Num):");
-        for (char *line = buf, *next; line && *line; line = next) {
-            next = strchr(line, '\n');
-            if (next) {
-                *next = '\0';
-                next++;
-            }
-            size_t len = strlen(line);
-            if (len > 0 && line[len - 1] == '\r')
-                line[len - 1] = '\0';
-            if (line[0])
-                LOG_INFO("  %s", line);
-        }
-
-        // OSThreads run cooperatively inside the 'loop' FreeRTOS task and do not
-        // appear in vTaskList. List them here with their next-run delay — short
-        // intervals are the prime suspects for keeping the main loop awake (and
-        // for triggering peripherals that implicitly request HFXO).
-        unsigned long now = millis();
-        int n = concurrency::mainController.size();
-        LOG_INFO("PowerDiag: OSThreads in mainController (n=%d):", n);
-        for (int i = 0; i < n; i++) {
-            Thread *t = concurrency::mainController.get(i);
-            if (!t)
-                continue;
-            LOG_INFO("  [%2d] %-20s en=%u tillRun=%ld", i, t->ThreadName.c_str(), t->enabled, t->tillRun(now));
-        }
-#endif
-    }
-
   protected:
     int32_t runOnce() override
     {
-        static bool diagDumped = false;
-        if (!diagDumped) {
-            diagDumped = true;
-            dumpPowerDiag();
-        }
-
         if (waitingForTx) {
             bool txDone = doPreflightSleep();
             bool timedOut = (millis() - waitStartMs) > ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS;
