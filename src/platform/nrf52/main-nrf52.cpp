@@ -627,8 +627,11 @@ static void xiaoQspiFlashDpd()
 
     // Hard-power-off the QSPI peripheral block via the hidden POWER register.
     // nrfx_qspi_uninit only clears ENABLE; the block itself stays powered and
-    // can hold clock requests / quiescent current. 0xFFC=0 fully gates it off.
-
+    // can hold an HFCLK request — measured ~200 µA quiescent contribution from
+    // a stuck-on QSPI block. 0xFFC=0 fully gates it off. Flash chip stays in DPD
+    // regardless because DPD is internal to the flash and persists as long as VCC.
+    NRF_QSPI->ENABLE = 0;
+    *(volatile uint32_t *)(NRF_QSPI_BASE + 0xFFC) = 0;
 }
 #endif
 
