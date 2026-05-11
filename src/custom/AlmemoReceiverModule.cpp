@@ -203,6 +203,17 @@ volatile uint8_t  I2CSlaveThread::s_write_start     = 0;
 volatile uint8_t  I2CSlaveThread::s_write_count     = 0;
 
 /* -------------------------------------------------------------------------
+ * EEPROM slot layout (sensor info blocks live in eeprom[0])
+ * ---------------------------------------------------------------------- */
+
+static constexpr uint8_t SLOT_OFFSET[I2CSlaveThread::MAX_NODES] = {
+    0x08, 0x44, 0x80, 0xBC
+};
+
+/* "No value" pattern returned for empty slots on register reads from 0x40. */
+static const uint8_t ALMEMO_NO_VAL[I2CSlaveThread::REG_MAX] = { 0x00, 0x80, 0x00, 0x00 };
+
+/* -------------------------------------------------------------------------
  * Constructor
  * ---------------------------------------------------------------------- */
 
@@ -214,15 +225,13 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     memset(reg_data, 0, sizeof(reg_data));
     memset(reg_size, 0, sizeof(reg_size));
 
-    /* Populate EEPROM 0 (0x50) with device identity and sensor layout.
-     * All four sensor slots default to "empty" (SensorTyp 0xFF = s_sensors[0]).
-     * The master can later overwrite individual slots via I2C writes. */
+    /* EEPROM 0 (0x50): device identity at start, firmware version at end. */
     memcpy(&eeprom[0][0x00], "FHAD46  ", 8);
     strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
-    initSensorBuffer(&s_sensors[1], &eeprom[0][0x08], DIGITAL_SENSOR_INFO_SIZE);
-    initSensorBuffer(&s_sensors[2], &eeprom[0][0x44], DIGITAL_SENSOR_INFO_SIZE);
-    initSensorBuffer(&s_sensors[0], &eeprom[0][0x80], DIGITAL_SENSOR_INFO_SIZE);
-    initSensorBuffer(&s_sensors[0], &eeprom[0][0xBC], DIGITAL_SENSOR_INFO_SIZE);
+
+    /* All slots start empty; first packet from each node populates one. */
+    for (uint8_t i = 0; i < MAX_NODES; i++)
+        clearSlot(i);
 
     /* Init GPIO, arm PORT SENSE, enable GPIOTE interrupt. */
     i2c_bb_slave_init();
@@ -240,68 +249,181 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     i2c_bb_slave_register(0x50, onWrite, onRead);
     i2c_bb_slave_register(0x51, onWrite, onRead);
     i2c_bb_slave_register(0x40, onWrite, onRead);
-
 }
 
 /* -------------------------------------------------------------------------
- * OSThread
+ * Slot helpers
+ *
+ * onPacket() (Router task) and runOnce() (I2CSlave OSThread task) both touch
+ * nodes[]. Both are FreeRTOS tasks running at low frequency (one packet per
+ * sender interval, runOnce every ~1 s); a torn read of a 32-bit field is
+ * atomic on Cortex-M4 and the worst observable race — runOnce missing or
+ * mis-expiring once — is self-correcting on the next tick. No mutex needed.
+ *
+ * The unregister/register calls inside muteI2CFor/unmuteI2C modify the
+ * i2c_bb_slave callback table read from the GPIOTE ISR; those are wrapped in
+ * NVIC_DisableIRQ(GPIOTE_IRQn) for ISR-vs-task atomicity.
+ * ---------------------------------------------------------------------- */
+
+uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id)
+{
+    for (uint8_t i = 0; i < MAX_NODES; i++)
+        if (nodes[i].in_use && nodes[i].node_id == node_id) return i;
+    for (uint8_t i = 0; i < MAX_NODES; i++)
+        if (!nodes[i].in_use) return i;
+    /* All occupied: evict the LRU node (oldest last_seen_ms). */
+    uint8_t oldest = 0;
+    for (uint8_t i = 1; i < MAX_NODES; i++)
+        if (nodes[i].last_seen_ms < nodes[oldest].last_seen_ms) oldest = i;
+    expireSlot(oldest);
+    return oldest;
+}
+
+void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id)
+{
+    uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
+    initSensorBuffer(&s_sensors[1], buf, DIGITAL_SENSOR_INFO_SIZE); /* Temp template */
+    /* Overwrite the 10-char Kommentar with the 8-hex node_id, space-padded. */
+    char comment[11];
+    snprintf(comment, sizeof(comment), "%08X  ", (unsigned)node_id);
+    memcpy(&buf[32], comment, 10);
+    writeEeprom(0x50, SLOT_OFFSET[slot], buf, DIGITAL_SENSOR_INFO_SIZE);
+}
+
+void I2CSlaveThread::clearSlot(uint8_t slot)
+{
+    uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
+    initSensorBuffer(&s_sensors[0], buf, DIGITAL_SENSOR_INFO_SIZE); /* empty template */
+    writeEeprom(0x50, SLOT_OFFSET[slot], buf, DIGITAL_SENSOR_INFO_SIZE);
+    writeReg(slot, ALMEMO_NO_VAL);
+}
+
+void I2CSlaveThread::writeTempForSlot(uint8_t slot, float t)
+{
+    int16_t tt = (int16_t)(t * 100.0f);
+    uint8_t data[REG_MAX] = {
+        0x00, 0x40,
+        (uint8_t)((uint16_t)tt >> 8),
+        (uint8_t)((uint16_t)tt & 0xFF),
+    };
+    writeReg(slot, data);
+}
+
+void I2CSlaveThread::expireSlot(uint8_t slot)
+{
+    LOG_INFO("AlmemoRx: slot %u expired (node=%08X)", slot, (unsigned)nodes[slot].node_id);
+    nodes[slot] = NodeEntry{};
+    clearSlot(slot);
+    muteI2CFor(ALMEMO_RX_MUTE_MS);
+}
+
+void I2CSlaveThread::muteI2CFor(uint32_t ms)
+{
+    /* Idempotent: extend the deadline; unregister only on first entry into the
+     * window. unregister() is itself idempotent against missing entries. */
+    if (!muteUntilMs) {
+        NVIC_DisableIRQ(GPIOTE_IRQn);
+        i2c_bb_slave_unregister(0x40);
+        i2c_bb_slave_unregister(0x50);
+        i2c_bb_slave_unregister(0x51);
+        NVIC_EnableIRQ(GPIOTE_IRQn);
+        LOG_INFO("I2CSlave: muted for %lums (addresses unregistered)", (unsigned long)ms);
+    }
+    muteUntilMs = millis() + ms;
+    if (!muteUntilMs) muteUntilMs = 1; /* reserve 0 as "not muted" sentinel */
+}
+
+void I2CSlaveThread::unmuteI2C()
+{
+    NVIC_DisableIRQ(GPIOTE_IRQn);
+    i2c_bb_slave_register(0x50, onWrite, onRead);
+    i2c_bb_slave_register(0x51, onWrite, onRead);
+    i2c_bb_slave_register(0x40, onWrite, onRead);
+    NVIC_EnableIRQ(GPIOTE_IRQn);
+    muteUntilMs = 0;
+    LOG_INFO("I2CSlave: un-muted, addresses re-registered");
+}
+
+/* -------------------------------------------------------------------------
+ * onPacket — mesh -> slot table update (called from Router task)
+ * ---------------------------------------------------------------------- */
+
+void I2CSlaveThread::onPacket(uint32_t node_id, float temp_c)
+{
+    uint8_t slot = findOrAllocSlot(node_id);
+
+    uint32_t now = millis();
+    NodeEntry &n = nodes[slot];
+    if (!n.in_use) {
+        n.in_use       = true;
+        n.node_id      = node_id;
+        n.prev_seen_ms = 0;
+        n.last_seen_ms = now;
+        initSlotForNode(slot, node_id);
+        /* Sensor count just increased — force the master to rescan EEPROM by
+         * going silent on I2C for ALMEMO_RX_MUTE_MS. Same mechanism we use on
+         * expiration; expireSlot() already does this for the eviction case. */
+        muteI2CFor(ALMEMO_RX_MUTE_MS);
+        LOG_INFO("AlmemoRx: slot %u allocated for node=%08X", slot, (unsigned)node_id);
+    } else {
+        n.prev_seen_ms = n.last_seen_ms;
+        n.last_seen_ms = now;
+    }
+
+    writeTempForSlot(slot, temp_c);
+}
+
+/* -------------------------------------------------------------------------
+ * OSThread runOnce — periodic expiration scan + mute end + stats log
  * ---------------------------------------------------------------------- */
 
 int32_t I2CSlaveThread::runOnce()
 {
-    if (s_write_pending) {
-        s_write_pending = false;
-        uint8_t        idx   = (s_write_addr == 0x51) ? 1 : 0;
-        uint8_t        start = s_write_start;
-        uint8_t        count = s_write_count;
-        const uint8_t *d     = eeprom[idx] + start;
-        char           hex[3 * 32 + 1]; /* "xx " per byte, null-terminated */
-        char          *hp    = hex;
-        for (uint8_t i = 0; i < count; i++) {
-            hp += snprintf(hp, 4, "%02x ", d[i]);
+    /* End the mute window? Re-register addresses so the master sees us again. */
+    if (muteUntilMs && (int32_t)(millis() - muteUntilMs) >= 0)
+        unmuteI2C();
+
+    /* Expiration scan. */
+    {
+        uint32_t now = millis();
+        for (uint8_t i = 0; i < MAX_NODES; i++) {
+            NodeEntry &n = nodes[i];
+            if (!n.in_use) continue;
+            uint32_t timeout;
+            if (n.prev_seen_ms == 0) {
+                timeout = ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS;
+            } else {
+                uint32_t interval = n.last_seen_ms - n.prev_seen_ms;
+                timeout = interval + interval / 20; /* +5% margin */
+            }
+            if ((int32_t)(now - n.last_seen_ms) > (int32_t)timeout)
+                expireSlot(i);
         }
-        LOG_INFO("I2CSlave write 0x%02x @0x%02x (%u B): %s", s_write_addr, start, s_write_count, hex);
-        return 0; /* sofort wiederkommen falls noch ein Write anliegt */
     }
 
-    /* Stale-link watchdog: no new AlmemoSensorPacket since last tick → overwrite
-     * temperature and humidity registers with ALMEMO "no value" pattern.
-     * lastPacketTimestamp starts at 0, so before the first packet arrives the
-     * registers are set stale too. */
-/*
-    uint32_t cur = lastPacketTimestamp;
-    if (cur == prevSeenTimestamp) {
-        static const uint8_t STALE[REG_MAX] = { 0x00, 0x80, 0x00, 0x00 };
-        writeReg(0, STALE);
-        writeReg(1, STALE);
-        LOG_WARN("AlmemoRx: stale (no new packet since ts=%lu)", (unsigned long)cur);
-    } else {
-        prevSeenTimestamp = cur;
+    /* Stats log, throttled to ~5s independently of the runOnce cadence. */
+    static uint32_t lastLogMs = 0;
+    if ((int32_t)(millis() - lastLogMs) >= 5000) {
+        lastLogMs = millis();
+        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu wr=%lu rd=%lu ack=%lu bus_to=%lu",
+                 (uint32_t)i2c_bb_slave_stats.starts,
+                 (uint32_t)i2c_bb_slave_stats.stops,
+                 (uint32_t)i2c_bb_slave_stats.addr_matches,
+                 (uint32_t)i2c_bb_slave_stats.addr_misses,
+                 (uint32_t)i2c_bb_slave_stats.writes,
+                 (uint32_t)i2c_bb_slave_stats.reads,
+                 (uint32_t)i2c_bb_slave_stats.acks_sent,
+                 (uint32_t)i2c_bb_slave_stats.scl_timeouts);
     }
-*/
-    const volatile uint32_t *p = i2c_bb_slave_stats.scl_periods;
-    uint8_t n = i2c_bb_slave_stats.scl_period_idx;
-    if (n > I2C_BB_SCL_PERIOD_LOG) n = I2C_BB_SCL_PERIOD_LOG;
-    LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu wr=%lu rd=%lu ack=%lu "
-             "bus_to=%lu "
-             "p(%u): %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
-             (uint32_t)i2c_bb_slave_stats.starts,
-             (uint32_t)i2c_bb_slave_stats.stops,
-             (uint32_t)i2c_bb_slave_stats.addr_matches,
-             (uint32_t)i2c_bb_slave_stats.addr_misses,
-             (uint32_t)i2c_bb_slave_stats.writes,
-             (uint32_t)i2c_bb_slave_stats.reads,
-             (uint32_t)i2c_bb_slave_stats.acks_sent,
-             (uint32_t)i2c_bb_slave_stats.scl_timeouts,
-             (unsigned)n,
-             (uint32_t)p[0],  (uint32_t)p[1],  (uint32_t)p[2],  (uint32_t)p[3],
-             (uint32_t)p[4],  (uint32_t)p[5],  (uint32_t)p[6],  (uint32_t)p[7],
-             (uint32_t)p[8],  (uint32_t)p[9],  (uint32_t)p[10], (uint32_t)p[11],
-             (uint32_t)p[12], (uint32_t)p[13], (uint32_t)p[14], (uint32_t)p[15]);
 
-    return 5000;
-
-
+    /* While muted, schedule the next wakeup tightly on the deadline so the
+     * re-register snaps in close to ALMEMO_RX_MUTE_MS rather than the 1Hz tick. */
+    if (muteUntilMs) {
+        int32_t remaining = (int32_t)(muteUntilMs - millis());
+        if (remaining < 0) remaining = 0;
+        return remaining + 10;
+    }
+    return 1000;
 }
 
 /* -------------------------------------------------------------------------

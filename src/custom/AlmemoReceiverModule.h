@@ -11,6 +11,18 @@
 #define ALMEMO_CHANNEL_INDEX 1
 #endif
 
+/* Fallback timeout if a node has only sent one packet so far (no interval
+ * estimate available yet). After this much silence the slot is cleared. */
+#ifndef ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS
+#define ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS 60000u
+#endif
+
+/* Duration to NACK all I2C transactions after a slot is cleared, so the
+ * master rescans and updates its sensor count. */
+#ifndef ALMEMO_RX_MUTE_MS
+#define ALMEMO_RX_MUTE_MS 200u
+#endif
+
 /**
  * I2CSlaveThread
  *
@@ -18,18 +30,22 @@
  * Responds on three addresses:
  *
  *   0x50, 0x51 — EEPROM emulation (24C02 style, 256 bytes each)
- *                Write: [mem_addr, data...]  sets pointer + writes
- *                Write: [mem_addr]           sets pointer only
- *                Read:                       returns bytes from pointer, auto-increment
+ *   0x40       — Register device (registers 0x00–0x03, one per sensor slot)
  *
- *   0x40       — Register device (registers 0x00–0x03)
- *                Write: [reg_addr]           selects register
- *                Read:                       returns reg_data[reg_addr][0..reg_size[reg_addr]-1]
+ * Multi-node tracking
+ * -------------------
+ * Up to MAX_NODES (4) ALMEMO senders can be represented simultaneously,
+ * one EEPROM sensor-info slot + one live register per node, identified by
+ * Meshtastic node_id (8 hex chars in the slot's Kommentar field).
  *
- * Usage:
- *   Fill reg_data / reg_size before or after construction.
- *   Read/write eeprom[] directly for EEPROM contents.
- *   All fields accessed from ISR — keep accesses atomic or use disable/enable.
+ * onPacket() is the entry point from the mesh: allocates a slot for unseen
+ * node_ids, updates timestamps and the live temp register for known ones.
+ *
+ * runOnce() expires slots whose sender went silent longer than its measured
+ * inter-arrival interval × 1.05 (or ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS if only
+ * one packet has been received). On expiration the slot is reset to the empty
+ * template and the I2C slave goes silent for ALMEMO_RX_MUTE_MS so the master
+ * rescans.
  */
 class I2CSlaveThread : public concurrency::OSThread
 {
@@ -37,39 +53,33 @@ class I2CSlaveThread : public concurrency::OSThread
     static constexpr size_t   EEPROM_SIZE = 256;
     static constexpr uint8_t  REG_COUNT   = 4;
     static constexpr size_t   REG_MAX     = 4; // bytes per register (always 4)
+    static constexpr uint8_t  MAX_NODES   = 4; // one slot per node (temp only)
 
     /* EEPROM contents — index 0 = 0x50, index 1 = 0x51 */
     uint8_t eeprom[2][EEPROM_SIZE];
 
-    /* Register device (0x40) — fill before enabling */
+    /* Register device (0x40) — reg[i] holds the latest temp for nodes[i] */
     uint8_t reg_data[REG_COUNT][REG_MAX];
     uint8_t reg_size[REG_COUNT]; // number of valid bytes per register (0..4)
-
-    /* Liveness: AlmemoReceiverModule writes the packet timestamp here after each
-     * register update.  runOnce() compares against prevSeenTimestamp and, if
-     * unchanged since the previous tick, overwrites the data registers with the
-     * ALMEMO "no value" pattern 0x00 0x80 0x00 0x00 to signal a broken link. */
-    volatile uint32_t lastPacketTimestamp = 0;
 
     I2CSlaveThread();
 
     /**
+     * Ingest a packet from the mesh. Allocates a slot for new node_ids,
+     * refreshes timestamps and updates the live temp register for known
+     * nodes. Called from the Router task.
+     */
+    void onPacket(uint32_t node_id, float temp_c);
+
+    /**
      * Safely write into the virtual EEPROM from task context.
      * Disables the GPIOTE IRQ around the copy so the ISR never sees a torn buffer.
-     *
-     * @param addr    I2C address: 0x50 or 0x51
-     * @param offset  Byte offset within the 256-byte EEPROM (0x00–0xFF)
-     * @param data    Source data
-     * @param len     Number of bytes to write (clamped to fit)
      */
     void writeEeprom(uint8_t addr, uint8_t offset, const uint8_t *data, uint8_t len);
 
     /**
      * Safely write 4 bytes into a register from task context.
      * Disables the GPIOTE IRQ around the copy so the ISR never sees a torn buffer.
-     *
-     * @param reg   Register index (0..REG_COUNT-1)
-     * @param data  Exactly 4 bytes to write
      */
     void writeReg(uint8_t reg, const uint8_t data[REG_MAX]);
 
@@ -77,6 +87,24 @@ class I2CSlaveThread : public concurrency::OSThread
     int32_t runOnce() override;
 
   private:
+    struct NodeEntry {
+        uint32_t node_id;
+        uint32_t last_seen_ms;
+        uint32_t prev_seen_ms; /* 0 = only one packet seen so far — interval unknown */
+        bool     in_use;
+    };
+
+    NodeEntry nodes[MAX_NODES] = {};
+    uint32_t  muteUntilMs = 0;       /* 0 = not muted; otherwise wall-time deadline */
+
+    uint8_t findOrAllocSlot(uint32_t node_id);
+    void    initSlotForNode(uint8_t slot, uint32_t node_id);
+    void    clearSlot(uint8_t slot);
+    void    writeTempForSlot(uint8_t slot, float t);
+    void    expireSlot(uint8_t slot);
+    void muteI2CFor(uint32_t ms);
+    void unmuteI2C();
+
     /* Internal state (accessed from ISR — keep volatile) */
     static volatile uint8_t s_eeprom_ptr[2]; // current address pointer per EEPROM
     static volatile uint8_t s_reg_ptr;       // current register for 0x40
@@ -84,32 +112,22 @@ class I2CSlaveThread : public concurrency::OSThread
     /* Singleton pointer so static callbacks can reach instance data */
     static I2CSlaveThread *s_instance;
 
-    /* Write notification — set from ISR, consumed in runOnce */
+    /* Write notification — unused on the read-only EEPROM path (kept for #if 0) */
     static volatile bool    s_write_pending;
-    static volatile uint8_t s_write_addr;   /* I2C address that was written */
-    static volatile uint8_t s_write_start;  /* EEPROM pointer before the write */
-    static volatile uint8_t s_write_count;  /* number of data bytes written    */
+    static volatile uint8_t s_write_addr;
+    static volatile uint8_t s_write_start;
+    static volatile uint8_t s_write_count;
 
     static void     onWrite(uint8_t addr, const uint8_t *buf, uint8_t len);
     static uint8_t  onRead (uint8_t addr, uint8_t *buf, uint8_t max_len);
-
-    /* Last packet timestamp seen by runOnce() — compared against
-     * lastPacketTimestamp each tick for the stale-link detector. */
-    uint32_t prevSeenTimestamp = 0;
 };
 
 /**
  * AlmemoReceiverModule
  *
  * Listens for AlmemoSensorPacket messages on PRIVATE_APP /
- * ALMEMO_CHANNEL_INDEX and forwards decoded sensor values into the
- * I2CSlaveThread register device (0x40):
- *
- *   reg 0: temperature  [0x00 0x40 MSB LSB]  fixed-point *100
- *   reg 1: humidity     [0x00 0x40 MSB LSB]  fixed-point *100
- *
- * Self-registers in the global MeshModule list on construction — no
- * further wiring needed beyond calling new AlmemoReceiverModule(slave).
+ * ALMEMO_CHANNEL_INDEX and forwards them into the I2CSlaveThread for
+ * per-node slot management.
  */
 class AlmemoReceiverModule : public SinglePortModule
 {
@@ -136,27 +154,10 @@ class AlmemoReceiverModule : public SinglePortModule
         AlmemoSensorPacket pkt;
         memcpy(&pkt, mp.decoded.payload.bytes, sizeof(pkt));
 
-        int16_t temp = (int16_t)(pkt.temp * 100.0f);
-        int16_t humi = (int16_t)(pkt.humi * 100.0f);
+        slave->onPacket(pkt.node_id, pkt.temp);
 
-        uint8_t datatemp[I2CSlaveThread::REG_MAX] = {
-            0x00, 0x40,
-            (uint8_t)((uint16_t)temp >> 8),
-            (uint8_t)((uint16_t)temp & 0xFF),
-        };
-        slave->writeReg(0, datatemp);
-
-        uint8_t datahumi[I2CSlaveThread::REG_MAX] = {
-            0x00, 0x40,
-            (uint8_t)((uint16_t)humi >> 8),
-            (uint8_t)((uint16_t)humi & 0xFF),
-        };
-        slave->writeReg(1, datahumi);
-
-        slave->lastPacketTimestamp = pkt.timestamp;
-
-        LOG_INFO("AlmemoRx: node=%08x t=%lu temp=%.2f humi=%.2f",
-                 pkt.node_id, (unsigned long)pkt.timestamp, pkt.temp, pkt.humi);
+        LOG_INFO("AlmemoRx: node=%08x t=%lu temp=%.2f",
+                 pkt.node_id, (unsigned long)pkt.timestamp, pkt.temp);
 
         return ProcessMessage::CONTINUE;
     }
