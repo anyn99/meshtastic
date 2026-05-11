@@ -213,9 +213,11 @@ meshtastic_QueueStatus RadioLibInterface::getQueueStatus()
 
 bool RadioLibInterface::canSleep()
 {
-    bool res = txQueue.empty();
+    // sendingPacket is dequeued from txQueue before startSend(); without checking it,
+    // preflight would green-light sleep mid-TX and the receiver sees a truncated packet (CRC mismatch).
+    bool res = txQueue.empty() && sendingPacket == nullptr;
     if (!res) { // only print debug messages if we are vetoing sleep
-        LOG_DEBUG("Radio wait to sleep, txEmpty=%d", res);
+        LOG_DEBUG("Radio wait to sleep, txEmpty=%d sending=%d", txQueue.empty(), sendingPacket != nullptr);
     }
     return res;
 }
