@@ -227,6 +227,12 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     /* Init GPIO, arm PORT SENSE, enable GPIOTE interrupt. */
     i2c_bb_slave_init();
 
+    /* TinyUSB sets USBD_IRQn to prio 2 (same as our GPIOTE) — equal-priority
+     * ISRs do not preempt each other, so a USBD burst (log flush, SOF storm)
+     * can delay PORT-event handling enough to skew the bit-bang state machine.
+     * Drop USBD to prio 3 so GPIOTE@2 preempts it. */
+    NVIC_SetPriority(USBD_IRQn, 3);
+
     /* Prepare blue LED (P0.06) for ISR debug (LED_STATE_ON=0, common anode). */
     nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(0, 6));
     nrf_gpio_pin_set(NRF_GPIO_PIN_MAP(0, 6)); /* start OFF */
@@ -262,6 +268,7 @@ int32_t I2CSlaveThread::runOnce()
      * temperature and humidity registers with ALMEMO "no value" pattern.
      * lastPacketTimestamp starts at 0, so before the first packet arrives the
      * registers are set stale too. */
+/*
     uint32_t cur = lastPacketTimestamp;
     if (cur == prevSeenTimestamp) {
         static const uint8_t STALE[REG_MAX] = { 0x00, 0x80, 0x00, 0x00 };
@@ -271,7 +278,7 @@ int32_t I2CSlaveThread::runOnce()
     } else {
         prevSeenTimestamp = cur;
     }
-
+*/
     const volatile uint32_t *p = i2c_bb_slave_stats.scl_periods;
     uint8_t n = i2c_bb_slave_stats.scl_period_idx;
     if (n > I2C_BB_SCL_PERIOD_LOG) n = I2C_BB_SCL_PERIOD_LOG;
