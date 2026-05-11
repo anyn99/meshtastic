@@ -710,14 +710,25 @@ void cpuDeepSleep(uint32_t msecToWake)
         // Force-stop HFCLK so we drop to the 16MHz internal RC (or fully off in WFI).
         NRF_CLOCK->TASKS_HFCLKSTOP = 1;
 
+        // Skip the bootloader's double-reset DFU-detect window on the warm reset
+        // below — saves ~500 ms of wake latency per cycle. Bootloader self-clears
+        // the magic, so a power-cycle/Reset-button still enters UF2 DFU normally.
+        constexpr uint32_t DFU_MAGIC_SKIP = 0x6d;
+        if (!(sd_power_gpregret_clr(0, 0xFF) == NRF_SUCCESS &&
+              sd_power_gpregret_set(0, DFU_MAGIC_SKIP) == NRF_SUCCESS)) {
+            NRF_POWER->GPREGRET = DFU_MAGIC_SKIP;
+        }
+
         delay(msecToWake);
         NVIC_SystemReset();
     } else {
         // Resume on user button press
         // https://github.com/lyusupov/SoftRF/blob/81c519ca75693b696752235d559e881f2e0511ee/software/firmware/source/SoftRF/src/platform/nRF52.cpp#L1738
         constexpr uint32_t DFU_MAGIC_SKIP = 0x6d;
-        sd_power_gpregret_clr(0, 0xFF);           // Clear the register before setting a new values in it for stability reasons
-        sd_power_gpregret_set(0, DFU_MAGIC_SKIP); // Equivalent NRF_POWER->GPREGRET = DFU_MAGIC_SKIP
+        if (!(sd_power_gpregret_clr(0, 0xFF) == NRF_SUCCESS &&
+              sd_power_gpregret_set(0, DFU_MAGIC_SKIP) == NRF_SUCCESS)) {
+            NRF_POWER->GPREGRET = DFU_MAGIC_SKIP; // SD-off fallback (e.g. MESHTASTIC_EXCLUDE_BLUETOOTH)
+        }
 
         // FIXME, use system off mode with ram retention for key state?
         // FIXME, use non-init RAM per
