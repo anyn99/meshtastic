@@ -4,10 +4,13 @@
 #include "configuration.h"
 
 #include "AlmemoPacket.h"
+#include "Default.h"
 #include "MeshService.h"
 #include "NodeDB.h"
+#include "NodeStatus.h"
 #include "Router.h"
 #include "gps/RTC.h"
+#include "power/PowerHAL.h"
 #include "sleep.h"
 #include <Adafruit_SHT31.h>
 #include <Wire.h>
@@ -37,22 +40,24 @@ extern "C" {
 #define ALMEMO_CHANNEL_INDEX 1
 #endif
 
-// Total cycle time: boot + sensor read + TX + sleep. Deep sleep duration is
-// (ALMEMO_SENDER_INTERVAL_MS - millis() at sleep entry), so the cadence stays
-// constant regardless of how long boot/TX takes.
-#ifndef ALMEMO_SENDER_INTERVAL_MS
-#define ALMEMO_SENDER_INTERVAL_MS 30000
+// Default cycle time in seconds if moduleConfig.telemetry.environment_update_interval is 0.
+// The actual cadence is driven at runtime by moduleConfig.telemetry.environment_update_interval
+// (settable via meshtastic CLI). Deep sleep duration is (intervalMs - millis() at sleep entry),
+// so the cadence stays constant regardless of how long boot/TX takes.
+#ifndef ALMEMO_SENDER_DEFAULT_INTERVAL_SECS
+#define ALMEMO_SENDER_DEFAULT_INTERVAL_SECS 30
 #endif
 
 // OSThread poll cadence — used between TX completion checks and as the retry
-// interval when the sensor isn't ready yet. Must be << ALMEMO_SENDER_INTERVAL_MS.
+// interval when the sensor isn't ready yet. Must be << configured interval.
 #ifndef ALMEMO_SENDER_THREADINTERVAL_MS
 #define ALMEMO_SENDER_THREADINTERVAL_MS 50
 #endif
 
 // Hard cap so we never get stuck in the wait-for-TX state if something jams the radio.
+// Decoupled from the send interval — a TX should never take more than seconds.
 #ifndef ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS
-#define ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS ALMEMO_SENDER_INTERVAL_MS
+#define ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS 30000
 #endif
 
 // Floor for the deep-sleep duration if boot+TX took longer than the cycle.
@@ -68,12 +73,21 @@ class AlmemoSenderThread : public concurrency::OSThread
 {
     Adafruit_SHT31 sht;
     bool sensorReady = false;
-    bool waitingForTx = false;
+    bool waitingForTxToSleep = false;
     uint32_t waitStartMs = 0;
 
     static bool sensorPowerSaving()
     {
+        if (powerHAL_isVBUSConnected()) // USB steckt: wach bleiben, damit das Gerät erreichbar ist
+            return false;
         return config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR && config.power.is_power_saving;
+    }
+
+    // Send cadence in ms, runtime-configurable via moduleConfig.telemetry.environment_update_interval (sec).
+    static uint32_t intervalMs()
+    {
+        return Default::getConfiguredOrDefaultMsScaled(moduleConfig.telemetry.environment_update_interval,
+                                                       ALMEMO_SENDER_DEFAULT_INTERVAL_SECS, nodeStatus->getNumOnline());
     }
 
   public:
@@ -86,17 +100,17 @@ class AlmemoSenderThread : public concurrency::OSThread
   protected:
     int32_t runOnce() override
     {
-        if (waitingForTx) {
+        if (waitingForTxToSleep) {
             bool txDone = doPreflightSleep();
             bool timedOut = (millis() - waitStartMs) > ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS;
             if (!txDone && !timedOut)
                 return ALMEMO_SENDER_THREADINTERVAL_MS;
 
-            waitingForTx = false;
+            waitingForTxToSleep = false;
+            uint32_t cycleMs = intervalMs();
             uint32_t elapsed = millis();
-            uint32_t sleepMs = (elapsed < ALMEMO_SENDER_INTERVAL_MS) ? (ALMEMO_SENDER_INTERVAL_MS - elapsed)
-                                                                     : ALMEMO_SENDER_MIN_SLEEP_MS;
-            LOG_DEBUG("AlmemoSender: deep sleep %ums (cycle=%u, awake=%u%s)", sleepMs, ALMEMO_SENDER_INTERVAL_MS, elapsed,
+            uint32_t sleepMs = (elapsed < cycleMs) ? (cycleMs - elapsed) : ALMEMO_SENDER_MIN_SLEEP_MS;
+            LOG_DEBUG("AlmemoSender: deep sleep %ums (cycle=%u, awake=%u%s)", sleepMs, cycleMs, elapsed,
                       timedOut ? ", tx timeout" : "");
             // skipPreflight=true: we already polled doPreflightSleep ourselves across runOnce calls,
             // so waitEnterSleep's blocking poll-loop (which would deadlock the radio thread) is bypassed.
@@ -142,10 +156,10 @@ class AlmemoSenderThread : public concurrency::OSThread
         LOG_DEBUG("AlmemoSender temp: %.2f degC  humi: %.2f %%rH", pkt.temp, pkt.humi);
 
         if (sensorPowerSaving()) {
-            waitingForTx = true;
+            waitingForTxToSleep = true;
             waitStartMs = millis();
             return ALMEMO_SENDER_THREADINTERVAL_MS;
         }
-        return ALMEMO_SENDER_INTERVAL_MS;
+        return intervalMs();
     }
 };
