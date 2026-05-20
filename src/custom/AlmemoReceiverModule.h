@@ -20,7 +20,7 @@
 /* Duration to NACK all I2C transactions after a slot is cleared, so the
  * master rescans and updates its sensor count. */
 #ifndef ALMEMO_RX_MUTE_MS
-#define ALMEMO_RX_MUTE_MS 200u
+#define ALMEMO_RX_MUTE_MS 2000u
 #endif
 
 /**
@@ -36,7 +36,7 @@
  * -------------------
  * Up to MAX_NODES (4) ALMEMO senders can be represented simultaneously,
  * one EEPROM sensor-info slot + one live register per node, identified by
- * Meshtastic node_id (8 hex chars in the slot's Kommentar field).
+ * Meshtastic node_id (last 4 hex chars / short name shown in the slot's Kommentar field).
  *
  * onPacket() is the entry point from the mesh: allocates a slot for unseen
  * node_ids, updates timestamps and the live temp register for known ones.

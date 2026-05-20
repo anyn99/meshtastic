@@ -283,9 +283,9 @@ void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id)
 {
     uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
     initSensorBuffer(&s_sensors[1], buf, DIGITAL_SENSOR_INFO_SIZE); /* Temp template */
-    /* Overwrite the 10-char Kommentar with the 8-hex node_id, space-padded. */
+    /* Overwrite the 10-char Kommentar with the last 4 hex chars of node_id (short name), space-padded. */
     char comment[11];
-    snprintf(comment, sizeof(comment), "%08X  ", (unsigned)node_id);
+    snprintf(comment, sizeof(comment), "%04X      ", (unsigned)(node_id & 0xFFFF));
     memcpy(&buf[32], comment, 10);
     writeEeprom(0x50, SLOT_OFFSET[slot], buf, DIGITAL_SENSOR_INFO_SIZE);
 }
@@ -394,7 +394,7 @@ int32_t I2CSlaveThread::runOnce()
                 timeout = ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS;
             } else {
                 uint32_t interval = n.last_seen_ms - n.prev_seen_ms;
-                timeout = interval + interval / 20; /* +5% margin */
+                timeout = interval + interval / 5 + 3000; /* +20% +3s margin (mesh jitter / retries) */
             }
             if ((int32_t)(now - n.last_seen_ms) > (int32_t)timeout)
                 expireSlot(i);
