@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 #include "AlmemoPacket.h"
-
+#include "Default.h"
 #if defined(ALMEMO_SENSOR_RECEIVER)
 #include "AlmemoReceiverModule.h"
 #else
@@ -48,6 +48,13 @@ class EmulatorThread : public concurrency::OSThread
 #if defined(ALMEMO_SENSOR_RECEIVER)
     I2CSlaveThread *slave;
 #endif
+
+    // Send cadence in ms, runtime-configurable via moduleConfig.telemetry.environment_update_interval (sec).
+    static uint32_t intervalMs()
+    {
+        return Default::getConfiguredOrDefaultMsScaled(moduleConfig.telemetry.environment_update_interval,
+        		EMULATOR_DEFAULT_INTERVAL_MS, nodeStatus->getNumOnline());
+    }
 
   public:
 #if defined(ALMEMO_SENSOR_RECEIVER)
@@ -103,10 +110,11 @@ class EmulatorThread : public concurrency::OSThread
         service->sendToMesh(p, RX_SRC_LOCAL);
 #endif
 
-        uint32_t intervalSecs = 0; //moduleConfig.detection_sensor.state_broadcast_secs;
-        int32_t  nextMs       = (intervalSecs > 0) ? (int32_t)(intervalSecs * 1000) : EMULATOR_DEFAULT_INTERVAL_MS;
 
-        LOG_DEBUG("Emulator temp: %d.%02d degC  humi: %d.%02d %%rH  next: %d ms",
+        uint32_t cycleMs = intervalMs();
+        uint32_t elapsed = millis();
+        uint32_t nextMs = (cycleMs > 0) ? cycleMs : EMULATOR_DEFAULT_INTERVAL_MS;
+        LOG_DEBUG("AlmemoEmulator:  temp: %d.%02d degC  humi: %d.%02d %%rH  next: %d ms",
                   temp / 100, temp % 100, humi / 100, humi % 100, nextMs);
 
         return nextMs;
