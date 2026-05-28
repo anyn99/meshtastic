@@ -417,9 +417,11 @@ int32_t I2CSlaveThread::runOnce()
         uint32_t acks    = i2c_bb_slave_stats.acks_sent;
         uint32_t bus_to  = i2c_bb_slave_stats.scl_timeouts;
         uint32_t a119    = i2c_bb_slave_stats.anomaly119_irqs;
+        uint32_t wr_edge = i2c_bb_slave_stats.write_edge_loss;
+        uint32_t rd_edge = i2c_bb_slave_stats.read_edge_loss;
 
-        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu wr=%lu rd=%lu ack=%lu state=%s",
-                 starts, stops, matches, misses, writes, reads, acks,
+        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu state=%s",
+                 starts, stops, matches, misses,
                  i2c_bb_slave_state_name());
 
         if (bus_to > 0) {
@@ -427,6 +429,12 @@ int32_t I2CSlaveThread::runOnce()
         }
         if (a119 > 0) {
             LOG_WARN("I2CSlave anomaly119: %lu (PORT event with no matching latch)", a119);
+        }
+        if (wr_edge > 0) {
+            LOG_WARN("I2CSlave write_edge_loss: %lu (ST_WRITE_POST_ACK falling-edge recovery)", wr_edge);
+        }
+        if (rd_edge > 0) {
+            LOG_WARN("I2CSlave read_edge_loss: %lu (ST_READ_LAST_BIT falling-edge recovery)", rd_edge);
         }
         /* wr/rd/ack invariant: each polling cycle is W-then-R; ack ≈ wr (one
          * ACK per write byte, ±1 for an in-flight transaction at log time). */

@@ -446,6 +446,7 @@ static void handle_scl_falling(void)
          * unseen R1 and is setting up the next data bit.  Release SDA so
          * master can drive, and resync state.
          */
+        i2c_bb_slave_stats.write_edge_loss++;
         sda_release();
         s_state = ST_WRITE_RX;
         stretch_end();
@@ -478,6 +479,7 @@ static void handle_scl_falling(void)
          * Master has already sampled the bit and is about to drive ACK/NACK;
          * release SDA and resync.
          */
+        i2c_bb_slave_stats.read_edge_loss++;
         sda_release();
         s_state = ST_READ_ACK_RX;
         stretch_end();

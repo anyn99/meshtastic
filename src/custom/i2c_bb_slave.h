@@ -94,6 +94,8 @@ typedef struct {
     volatile uint32_t spurious_stops;  /**< STOP detected while state machine was still in a READ data/ack phase (master should have ended cleanly via NACK first). */
     volatile uint32_t anomaly119_irqs; /**< IRQs entered with no LATCH bit set anywhere → true spurious / nRF52 Anomaly 119 fire. */
     volatile uint32_t irq_entries;     /**< Total entries into the IRQ handler (EVENTS_PORT != 0). Lets us see whether IRQs are still firing while a state appears stuck. */
+    volatile uint32_t write_edge_loss; /**< Defensive ST_WRITE_POST_ACK falling-edge recovery (missed ACK rising). */
+    volatile uint32_t read_edge_loss;  /**< Defensive ST_READ_LAST_BIT falling-edge recovery (missed last-bit rising). */
     volatile uint32_t scl_periods[I2C_BB_SCL_PERIOD_LOG]; /**< DWT ticks between SCL rising edges. */
     volatile uint8_t  scl_period_idx;                      /**< Next write index (wraps at I2C_BB_SCL_PERIOD_LOG). */
 } i2c_bb_slave_stats_t;
