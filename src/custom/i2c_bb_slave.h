@@ -90,6 +90,10 @@ typedef struct {
     volatile uint32_t reads;        /**< Read transactions served.               */
     volatile uint32_t acks_sent;    /**< Data-byte ACKs driven to master.        */
     volatile uint32_t scl_timeouts; /**< Resets triggered by stuck-bus timeout.  */
+    volatile uint32_t mid_tx_aborts;   /**< Timeouts that fired while a read or write transaction was in progress (tx_idx>0 or rx_len>0). */
+    volatile uint32_t spurious_stops;  /**< STOP detected while state machine was still in a READ data/ack phase (master should have ended cleanly via NACK first). */
+    volatile uint32_t anomaly119_irqs; /**< IRQs entered with no LATCH bit set anywhere → true spurious / nRF52 Anomaly 119 fire. */
+    volatile uint32_t irq_entries;     /**< Total entries into the IRQ handler (EVENTS_PORT != 0). Lets us see whether IRQs are still firing while a state appears stuck. */
     volatile uint32_t scl_periods[I2C_BB_SCL_PERIOD_LOG]; /**< DWT ticks between SCL rising edges. */
     volatile uint8_t  scl_period_idx;                      /**< Next write index (wraps at I2C_BB_SCL_PERIOD_LOG). */
 } i2c_bb_slave_stats_t;
@@ -113,6 +117,19 @@ bool i2c_bb_slave_register(uint8_t           addr,
 
 /** Unregister a previously registered slave address. */
 void i2c_bb_slave_unregister(uint8_t addr);
+
+/** Returns true when the state machine is in its idle (between transactions) state. */
+bool i2c_bb_slave_is_idle(void);
+
+/** Returns a static string naming the current state-machine state ("ST_IDLE", "ST_READ_TX", ...). */
+const char *i2c_bb_slave_state_name(void);
+
+/** Snapshot of state-machine internals for stuck-state debugging.
+ *  @param bit_cnt  Remaining bits to clock in the current byte (8 = none clocked yet).
+ *  @param rx_len   Number of received data bytes in the pending write buffer.
+ *  @param tx_idx   Number of bytes already transmitted in the current read.
+ */
+void i2c_bb_slave_get_debug(uint8_t *bit_cnt, uint8_t *rx_len, uint8_t *tx_idx);
 
 /**
  * Call from your GPIOTE_IRQHandler if you manage the IRQ yourself.

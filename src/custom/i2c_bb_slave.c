@@ -41,6 +41,12 @@
 
 #define _PIN_PORT(p)  ((p) < 32u ? NRF_P0 : NRF_P1)
 #define _PIN_BIT(p)   ((p) < 32u ? (p) : (p) - 32u)
+#define _PIN_MASK(p)  (1u << _PIN_BIT(p))
+
+#define I2C_BB_SDA_PORT  _PIN_PORT(I2C_BB_SDA_PIN)
+#define I2C_BB_SDA_MASK  _PIN_MASK(I2C_BB_SDA_PIN)
+#define I2C_BB_SCL_PORT  _PIN_PORT(I2C_BB_SCL_PIN)
+#define I2C_BB_SCL_MASK  _PIN_MASK(I2C_BB_SCL_PIN)
 
 // ─── State machine ─────────────────────────────────────────────────────────────
 //
@@ -89,37 +95,43 @@ static uint8_t s_matched_addr;
 static bool    s_is_read;
 
 // ─── GPIO helpers ──────────────────────────────────────────────────────────────
+//
+// Direct register access — bypasses nrf_gpio_cfg_input/output() which rewrites
+// the full PIN_CNF every call.  PIN_CNF is set up once in i2c_bb_slave_init()
+// with INPUT=CONNECT and PULL=PULLUP; release()/low() only flip the DIR bit
+// via DIRCLR/DIRSET and the output level via OUTCLR.  SENSE bits are managed
+// separately by pin_sense_set() and survive DIR changes.
 
 static inline void sda_release(void)
 {
-    nrf_gpio_cfg_input(I2C_BB_SDA_PIN, NRF_GPIO_PIN_PULLUP);
+    I2C_BB_SDA_PORT->DIRCLR = I2C_BB_SDA_MASK;
 }
 
 static inline void sda_low(void)
 {
-    nrf_gpio_pin_clear(I2C_BB_SDA_PIN);
-    nrf_gpio_cfg_output(I2C_BB_SDA_PIN);
+    I2C_BB_SDA_PORT->OUTCLR = I2C_BB_SDA_MASK;
+    I2C_BB_SDA_PORT->DIRSET = I2C_BB_SDA_MASK;
 }
 
 static inline bool sda_read(void)
 {
-    return nrf_gpio_pin_read(I2C_BB_SDA_PIN) != 0;
+    return (I2C_BB_SDA_PORT->IN & I2C_BB_SDA_MASK) != 0;
 }
 
 static inline void scl_release(void)
 {
-    nrf_gpio_cfg_input(I2C_BB_SCL_PIN, NRF_GPIO_PIN_PULLUP);
+    I2C_BB_SCL_PORT->DIRCLR = I2C_BB_SCL_MASK;
 }
 
 static inline void scl_low(void)
 {
-    nrf_gpio_pin_clear(I2C_BB_SCL_PIN);
-    nrf_gpio_cfg_output(I2C_BB_SCL_PIN);
+    I2C_BB_SCL_PORT->OUTCLR = I2C_BB_SCL_MASK;
+    I2C_BB_SCL_PORT->DIRSET = I2C_BB_SCL_MASK;
 }
 
 static inline bool scl_read(void)
 {
-    return nrf_gpio_pin_read(I2C_BB_SCL_PIN) != 0;
+    return (I2C_BB_SCL_PORT->IN & I2C_BB_SCL_MASK) != 0;
 }
 
 // ─── SENSE helpers ─────────────────────────────────────────────────────────────
@@ -260,6 +272,20 @@ static void handle_start(void)
 
 static void handle_stop(void)
 {
+    /*
+     * A clean read transaction ends with the master driving NACK on the 9th
+     * SCL cycle; reset_to_idle() then puts s_state back to ST_IDLE *before*
+     * the STOP condition arrives.  A STOP that interrupts an active READ-*
+     * state therefore signals either a protocol-violating master or — far
+     * more likely — that we misclassified a data-phase SDA edge as STOP
+     * because a previous SCL edge was lost (BASEPRI mask, USB storm, …).
+     */
+    if (s_state == ST_READ_TX ||
+        s_state == ST_READ_LAST_BIT ||
+        s_state == ST_READ_ACK_WAIT ||
+        s_state == ST_READ_ACK_RX) {
+        i2c_bb_slave_stats.spurious_stops++;
+    }
     commit_write_if_pending();
     i2c_bb_slave_stats.stops++;
     reset_to_idle();
@@ -380,7 +406,7 @@ static void handle_scl_falling(void)
         sda_low(); /* ACK */
 
         if (s_is_read) {
-            s_tx_len = e->on_read ? e->on_read(addr7, s_tx_buf, I2C_BB_MAX_BUF) : 0;
+            s_tx_len = e->on_read ? e->on_read(s_matched_addr, s_tx_buf, I2C_BB_MAX_BUF) : 0;
             i2c_bb_slave_stats.reads++;
             if (s_tx_len > I2C_BB_MAX_BUF) s_tx_len = I2C_BB_MAX_BUF;
             s_tx_idx    = 0;
@@ -408,6 +434,24 @@ static void handle_scl_falling(void)
         return;
     }
 
+    /* ── Defensive: missed ACK-rising during write ──────────────────── */
+    case ST_WRITE_POST_ACK: {
+        /*
+         * Normal path: rising of ACK cycle advanced state → ST_WRITE_RX,
+         * then this falling-handler's ST_WRITE_RX case releases SDA.
+         * If the rising IRQ was lost (high-prio IRQ blocked us long enough
+         * that master had R1 + F2 inside one of our IRQs), the next event
+         * is this falling, with state still ST_WRITE_POST_ACK and SDA still
+         * driven low (ACK).  Master has by now sampled the ACK on the
+         * unseen R1 and is setting up the next data bit.  Release SDA so
+         * master can drive, and resync state.
+         */
+        sda_release();
+        s_state = ST_WRITE_RX;
+        stretch_end();
+        return;
+    }
+
     /* ── Drive ACK (or NACK on overflow) for received data byte ─────── */
     case ST_WRITE_ACK: {
         if (s_rx_len < I2C_BB_MAX_BUF) {
@@ -420,6 +464,22 @@ static void handle_scl_falling(void)
         s_shift_reg = 0;
         s_bit_cnt   = 8;
         s_state     = ST_WRITE_POST_ACK;
+        stretch_end();
+        return;
+    }
+
+    /* ── Defensive: missed rising of 8th data bit during read ───────── */
+    case ST_READ_LAST_BIT: {
+        /*
+         * Normal path: rising of last-bit cycle advanced state → ST_READ_ACK_WAIT,
+         * then the falling-handler's ST_READ_ACK_WAIT case releases SDA.
+         * If that rising IRQ was lost, the next event is this falling with
+         * state still ST_READ_LAST_BIT and SDA still driven (last data bit).
+         * Master has already sampled the bit and is about to drive ACK/NACK;
+         * release SDA and resync.
+         */
+        sda_release();
+        s_state = ST_READ_ACK_RX;
         stretch_end();
         return;
     }
@@ -468,6 +528,8 @@ void i2c_bb_slave_gpiote_irq_handler(void)
     if (!NRF_GPIOTE->EVENTS_PORT) {
         return;
     }
+
+    i2c_bb_slave_stats.irq_entries++;
 
     /* ── Anomaly 119 workaround ───────────────────────────────────────────────
      *
@@ -533,6 +595,11 @@ void i2c_bb_slave_gpiote_irq_handler(void)
     if (s_state != ST_IDLE) {
         if ((uint32_t)(now_cyc - s_last_state_change_cyc) > I2C_BB_TIMEOUT_CYCLES) {
             i2c_bb_slave_stats.scl_timeouts++;
+            /* Timeout while transmitting or receiving real payload — that is
+             * the case the master observes as "data, data, …, then only 0xFF". */
+            if (s_tx_idx > 0 || s_rx_len > 0) {
+                i2c_bb_slave_stats.mid_tx_aborts++;
+            }
             commit_write_if_pending();
             reset_to_idle();
             s_last_state_change_cyc = now_cyc;
@@ -552,14 +619,14 @@ void i2c_bb_slave_gpiote_irq_handler(void)
      * IRQs do not reset the stuck-bus watchdog.
      */
     if (sda_latched && !scl_latched && s_scl_last) {
+        /* handle_stop calls reset_to_idle → s_state = ST_IDLE; re-arm skipped.
+         * handle_start → s_state = ST_ADDR_RX; re-arm block below handles SENSE. */
         s_last_state_change_cyc = now_cyc;
         if (!s_sda_last) {
             handle_start(); /* SDA fell while SCL high → START / Repeated START */
         } else {
             handle_stop();  /* SDA rose while SCL high → STOP                   */
         }
-        /* handle_stop calls reset_to_idle → s_state = ST_IDLE; re-arm skipped.
-         * handle_start → s_state = ST_ADDR_RX; re-arm block below handles SENSE. */
     } else if (scl_latched) {
         s_last_state_change_cyc = now_cyc;
         if (s_scl_last) {
@@ -568,15 +635,33 @@ void i2c_bb_slave_gpiote_irq_handler(void)
             handle_scl_falling();
         }
     }
-    /* else: spurious — no state-machine function ran; re-arm below restores SENSE. */
-
-    if (s_state != ST_IDLE) {
-		scl_sense_arm(s_scl_last);
-		sda_sense_arm(s_sda_last);
-    }
     else {
-        pin_sense_disable(I2C_BB_SCL_PIN);
-        pin_sense_set(I2C_BB_SDA_PIN, NRF_GPIO_PIN_SENSE_LOW);
+        /* Spurious — no state-machine function ran.
+         * Two flavours:
+         *  (a) sda_latched && !s_scl_last: SDA changed while SCL was LOW.  This
+         *      is a normal data-bit setup transition (master changes SDA between
+         *      clocks).  Benign — not counted.
+         *  (b) Otherwise (no LATCH bit set anywhere or some other odd case):
+         *      true unexplained spurious / nRF52 Anomaly 119. */
+        if (!(sda_latched && !s_scl_last)) {
+            i2c_bb_slave_stats.anomaly119_irqs++;
+        }
+    }
+
+    /* Re-arm SENSE for the next event.
+     *
+     * SCL is always armed for the opposite of its current level.
+     * SDA SENSE is only armed while SCL is HIGH — the only window where
+     * START/STOP can legally occur.  While SCL is LOW we disable SDA SENSE
+     * so master / slave data-setup transitions on SDA do not generate
+     * spurious IRQs. */
+    bool sda_now = sda_read();
+    bool scl_now = scl_read();
+    scl_sense_arm(scl_now);
+    if (scl_now) {
+        sda_sense_arm(sda_now);
+    } else {
+        pin_sense_disable(I2C_BB_SDA_PIN);
     }
 }
 
@@ -663,6 +748,35 @@ void i2c_bb_slave_unregister(uint8_t addr)
             return;
         }
     }
+}
+
+bool i2c_bb_slave_is_idle(void)
+{
+    return s_state == ST_IDLE;
+}
+
+void i2c_bb_slave_get_debug(uint8_t *bit_cnt, uint8_t *rx_len, uint8_t *tx_idx)
+{
+    if (bit_cnt) *bit_cnt = s_bit_cnt;
+    if (rx_len)  *rx_len  = s_rx_len;
+    if (tx_idx)  *tx_idx  = s_tx_idx;
+}
+
+const char *i2c_bb_slave_state_name(void)
+{
+    switch (s_state) {
+        case ST_IDLE:           return "ST_IDLE";
+        case ST_ADDR_RX:        return "ST_ADDR_RX";
+        case ST_ADDR_ACK:       return "ST_ADDR_ACK";
+        case ST_WRITE_RX:       return "ST_WRITE_RX";
+        case ST_WRITE_ACK:      return "ST_WRITE_ACK";
+        case ST_WRITE_POST_ACK: return "ST_WRITE_POST_ACK";
+        case ST_READ_TX:        return "ST_READ_TX";
+        case ST_READ_LAST_BIT:  return "ST_READ_LAST_BIT";
+        case ST_READ_ACK_WAIT:  return "ST_READ_ACK_WAIT";
+        case ST_READ_ACK_RX:    return "ST_READ_ACK_RX";
+    }
+    return "?";
 }
 
 #ifndef I2C_BB_OWN_IRQ

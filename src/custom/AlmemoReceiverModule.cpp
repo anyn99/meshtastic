@@ -133,31 +133,31 @@ static bool initSensorBuffer(const SensorChannelInfo *sensor, uint8_t *buf, size
 
 extern "C" void GPIOTE_IRQHandler(void)
 {
-    /* Debug: LED blue (Arduino pin 12 = P0.06 = native nRF pin 6) on while inside ISR.
-     * LED stays on  → stuck inside ISR (hang/storm).
-     * LED blinks once, system hangs → hang is outside ISR (task/scheduler). */
-    nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(0, 6)); /* ON — active-low, common anode */
-
     if (NRF_GPIOTE->EVENTS_PORT)
     {
         i2c_bb_slave_gpiote_irq_handler();
     }
 
     /* Dispatch EVENTS_IN callbacks (radio DIO1, EXT_CHRG_DETECT, …).
-     * Clears each EVENTS_IN register before invoking the callback — prevents
-     * interrupt storm if the callback does not de-assert the pin. */
-    gpiote_dispatch_events_in();
+     * Skip the call entirely when no IN channels are armed — common case
+     * inside this build, since PORT (I2C slave) is the hot path.  Spares
+     * the function call + the 8-channel scan inside it. */
+    if ((NRF_GPIOTE->INTENSET & 0xFFu) != 0) {
+        gpiote_dispatch_events_in();
+    }
 
     #if __CORTEX_M == 0x04
       __DSB(); __NOP();__NOP();__NOP();__NOP();
     #endif
-
-    nrf_gpio_pin_set(NRF_GPIO_PIN_MAP(0, 6)); /* LED OFF */
-
 }
 
 /* -------------------------------------------------------------------------
- * writeEeprom — ISR-safe EEPROM write from task context
+ * writeEeprom — EEPROM write from task context
+ *
+ * No NVIC_DisableIRQ around the memcpy: masking GPIOTE for the duration of a
+ * write blocks SCL-edge IRQs and desyncs the bit-bang state machine mid-
+ * transaction.  A torn read from the ISR is harmless — the master will get one
+ * transaction with a half-updated value and the next read returns the fresh one.
  * ---------------------------------------------------------------------- */
 
 void I2CSlaveThread::writeEeprom(uint8_t addr, uint8_t offset, const uint8_t *data, uint8_t len)
@@ -170,13 +170,13 @@ void I2CSlaveThread::writeEeprom(uint8_t addr, uint8_t offset, const uint8_t *da
     if (len > EEPROM_SIZE - offset)
         len = EEPROM_SIZE - offset;
 
-    NVIC_DisableIRQ(GPIOTE_IRQn);
     memcpy(&eeprom[idx][offset], data, len);
-    NVIC_EnableIRQ(GPIOTE_IRQn);
 }
 
 /* -------------------------------------------------------------------------
- * writeReg — ISR-safe register write from task context
+ * writeReg — register write from task context
+ *
+ * No NVIC_DisableIRQ — see writeEeprom rationale.
  * ---------------------------------------------------------------------- */
 
 void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
@@ -184,10 +184,8 @@ void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
     if (reg >= REG_COUNT)
         return;
 
-    NVIC_DisableIRQ(GPIOTE_IRQn);
     memcpy(reg_data[reg], data, REG_MAX);
     reg_size[reg] = REG_MAX;
-    NVIC_EnableIRQ(GPIOTE_IRQn);
 }
 
 /* -------------------------------------------------------------------------
@@ -401,19 +399,66 @@ int32_t I2CSlaveThread::runOnce()
         }
     }
 
-    /* Stats log, throttled to ~5s independently of the runOnce cadence. */
+    /* Stats log, throttled to ~5s independently of the runOnce cadence.
+     * Single concise line for the common case.  Anomalies (timeouts, addr
+     * misses, spurious IRQs, wr/rd/ack mismatch) are logged separately as
+     * persistent WARN lines whenever their counter is non-zero or the
+     * invariant is broken — so they're easy to grep for, and you never have
+     * to hunt through the rolling log for the one bad entry. */
     static uint32_t lastLogMs = 0;
     if ((int32_t)(millis() - lastLogMs) >= 5000) {
         lastLogMs = millis();
-        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu wr=%lu rd=%lu ack=%lu bus_to=%lu",
-                 (uint32_t)i2c_bb_slave_stats.starts,
-                 (uint32_t)i2c_bb_slave_stats.stops,
-                 (uint32_t)i2c_bb_slave_stats.addr_matches,
-                 (uint32_t)i2c_bb_slave_stats.addr_misses,
-                 (uint32_t)i2c_bb_slave_stats.writes,
-                 (uint32_t)i2c_bb_slave_stats.reads,
-                 (uint32_t)i2c_bb_slave_stats.acks_sent,
-                 (uint32_t)i2c_bb_slave_stats.scl_timeouts);
+        uint32_t starts  = i2c_bb_slave_stats.starts;
+        uint32_t stops   = i2c_bb_slave_stats.stops;
+        uint32_t matches = i2c_bb_slave_stats.addr_matches;
+        uint32_t misses  = i2c_bb_slave_stats.addr_misses;
+        uint32_t writes  = i2c_bb_slave_stats.writes;
+        uint32_t reads   = i2c_bb_slave_stats.reads;
+        uint32_t acks    = i2c_bb_slave_stats.acks_sent;
+        uint32_t bus_to  = i2c_bb_slave_stats.scl_timeouts;
+        uint32_t a119    = i2c_bb_slave_stats.anomaly119_irqs;
+
+        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu wr=%lu rd=%lu ack=%lu state=%s",
+                 starts, stops, matches, misses, writes, reads, acks,
+                 i2c_bb_slave_state_name());
+
+        if (bus_to > 0) {
+            LOG_WARN("I2CSlave bus_timeout: %lu (state machine forced to IDLE in IRQ watchdog)", bus_to);
+        }
+        if (a119 > 0) {
+            LOG_WARN("I2CSlave anomaly119: %lu (PORT event with no matching latch)", a119);
+        }
+        /* wr/rd/ack invariant: each polling cycle is W-then-R; ack ≈ wr (one
+         * ACK per write byte, ±1 for an in-flight transaction at log time). */
+        int32_t ack_skew = (int32_t)acks - (int32_t)writes;
+        if (writes != reads || ack_skew < -1 || ack_skew > 1) {
+            LOG_WARN("I2CSlave wr/rd/ack drift: wr=%lu rd=%lu ack=%lu", writes, reads, acks);
+        }
+    }
+
+    /* Stuck-state debug: whenever the state machine sits in a non-IDLE state
+     * for more than 1s, log which state plus the bit/byte counters and the
+     * IRQ-entries delta since we first noticed.  irq_delta == 0 → no IRQs are
+     * firing at all (bus genuinely quiet), so we just need a master poke to
+     * recover.  irq_delta > 0 → IRQs ARE firing but state is not progressing,
+     * i.e. a real state-machine bug. */
+    static uint32_t stuckSinceMs    = 0;
+    static uint32_t stuckIrqAtStart = 0;
+    if (i2c_bb_slave_is_idle()) {
+        stuckSinceMs    = 0;
+        stuckIrqAtStart = 0;
+    } else if (stuckSinceMs == 0) {
+        stuckSinceMs    = millis();
+        stuckIrqAtStart = i2c_bb_slave_stats.irq_entries;
+    } else if ((int32_t)(millis() - stuckSinceMs) > 1000) {
+        uint8_t  bit_cnt = 0, rx_len = 0, tx_idx = 0;
+        i2c_bb_slave_get_debug(&bit_cnt, &rx_len, &tx_idx);
+        uint32_t irq_delta = i2c_bb_slave_stats.irq_entries - stuckIrqAtStart;
+        LOG_WARN("I2CSlave stuck in %s for %ldms: bit_cnt=%u rx_len=%u tx_idx=%u irq_delta=%lu",
+                 i2c_bb_slave_state_name(),
+                 (long)(millis() - stuckSinceMs),
+                 bit_cnt, rx_len, tx_idx,
+                 (unsigned long)irq_delta);
     }
 
     /* While muted, schedule the next wakeup tightly on the deadline so the
