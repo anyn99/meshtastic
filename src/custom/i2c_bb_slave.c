@@ -34,6 +34,7 @@
 #include "nrf_gpiote.h"
 
 #include <string.h>
+#include <stdint.h>
 
 // ─── Internal constants ────────────────────────────────────────────────────────
 
@@ -531,6 +532,7 @@ void i2c_bb_slave_gpiote_irq_handler(void)
         return;
     }
 
+    uint32_t irq_entry_cyc = DWT->CYCCNT;
     i2c_bb_slave_stats.irq_entries++;
 
     /* ── Anomaly 119 workaround ───────────────────────────────────────────────
@@ -665,6 +667,11 @@ void i2c_bb_slave_gpiote_irq_handler(void)
     } else {
         pin_sense_disable(I2C_BB_SDA_PIN);
     }
+
+    uint32_t dur = DWT->CYCCNT - irq_entry_cyc;
+    uint8_t didx = i2c_bb_slave_stats.irq_dur_idx;
+    i2c_bb_slave_stats.irq_dur_cyc[didx] = dur;
+    i2c_bb_slave_stats.irq_dur_idx = (didx + 1) % I2C_BB_IRQ_DUR_LOG;
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────

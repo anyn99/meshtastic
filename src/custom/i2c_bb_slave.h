@@ -64,6 +64,9 @@ typedef struct {
 /** Number of SCL periods kept in the ring buffer. */
 #define I2C_BB_SCL_PERIOD_LOG 16
 
+/** Number of recent IRQ durations kept for the moving-window average. */
+#define I2C_BB_IRQ_DUR_LOG 10
+
 /**
  * Per-pin bus-stuck timeout in microseconds.
  * If SCL has not changed for this long, or SDA has not changed for this long,
@@ -96,6 +99,8 @@ typedef struct {
     volatile uint32_t irq_entries;     /**< Total entries into the IRQ handler (EVENTS_PORT != 0). Lets us see whether IRQs are still firing while a state appears stuck. */
     volatile uint32_t write_edge_loss; /**< Defensive ST_WRITE_POST_ACK falling-edge recovery (missed ACK rising). */
     volatile uint32_t read_edge_loss;  /**< Defensive ST_READ_LAST_BIT falling-edge recovery (missed last-bit rising). */
+    volatile uint32_t irq_dur_cyc[I2C_BB_IRQ_DUR_LOG]; /**< Ring of recent IRQ durations in DWT cycles (64 MHz → /64 = µs); reader derives min/avg/max from this. */
+    volatile uint8_t  irq_dur_idx;                      /**< Next write index (wraps at I2C_BB_IRQ_DUR_LOG). */
     volatile uint32_t scl_periods[I2C_BB_SCL_PERIOD_LOG]; /**< DWT ticks between SCL rising edges. */
     volatile uint8_t  scl_period_idx;                      /**< Next write index (wraps at I2C_BB_SCL_PERIOD_LOG). */
 } i2c_bb_slave_stats_t;

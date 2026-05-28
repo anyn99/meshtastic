@@ -7,6 +7,7 @@ extern "C" {
 }
 
 #include <nrf.h>      /* NRF_GPIOTE */
+#include <stdint.h>   /* UINT32_MAX */
 #include <string.h>
 
 /* gpiote_dispatch.cpp owns attachInterrupt/detachInterrupt and the EVENTS_IN
@@ -419,10 +420,32 @@ int32_t I2CSlaveThread::runOnce()
         uint32_t a119    = i2c_bb_slave_stats.anomaly119_irqs;
         uint32_t wr_edge = i2c_bb_slave_stats.write_edge_loss;
         uint32_t rd_edge = i2c_bb_slave_stats.read_edge_loss;
+        /* Moving-window min/avg/max over the last I2C_BB_IRQ_DUR_LOG IRQ
+         * durations.  Empty ring slots (before the ring is filled) are skipped
+         * so the window doesn't bias the stats at startup. */
+        uint32_t irq_min_cyc = UINT32_MAX;
+        uint32_t irq_max_cyc = 0;
+        uint32_t irq_sum     = 0;
+        uint8_t  irq_n       = 0;
+        for (uint8_t i = 0; i < I2C_BB_IRQ_DUR_LOG; i++) {
+            uint32_t v = i2c_bb_slave_stats.irq_dur_cyc[i];
+            if (v == 0) continue;
+            if (v < irq_min_cyc) irq_min_cyc = v;
+            if (v > irq_max_cyc) irq_max_cyc = v;
+            irq_sum += v;
+            irq_n++;
+        }
+        /* 64 MHz core → 64 cycles per µs. */
+        uint32_t irq_min_us = irq_n ? irq_min_cyc / 64 : 0;
+        uint32_t irq_max_us = irq_max_cyc / 64;
+        uint32_t irq_avg_us = irq_n ? (irq_sum / irq_n / 64) : 0;
 
-        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu state=%s",
+        LOG_INFO("I2CSlave: start=%lu stop=%lu match=%lu miss=%lu state=%s irq_us=%lu/%lu/%lu (min/avg/max)",
                  starts, stops, matches, misses,
-                 i2c_bb_slave_state_name());
+                 i2c_bb_slave_state_name(),
+                 (unsigned long)irq_min_us,
+                 (unsigned long)irq_avg_us,
+                 (unsigned long)irq_max_us);
 
         if (bus_to > 0) {
             LOG_WARN("I2CSlave bus_timeout: %lu (state machine forced to IDLE in IRQ watchdog)", bus_to);
