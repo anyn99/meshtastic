@@ -11,7 +11,9 @@ static AlmemoReceiverModule *almemoReceiverModule;
 static EmulatorThread *emulatorThread;
 #endif
 #if defined(ALMEMO_SENSOR_SENDER) && !defined(ALMEMO_EMULATOR)
+#include "custom/AlmemoLed.h"
 #include "custom/AlmemoSenderThread.h"
+AlmemoLedThread *almemoLedThread;
 static AlmemoSenderThread *almemoSenderThread;
 #endif
 #if !MESHTASTIC_EXCLUDE_GPS
@@ -1041,6 +1043,7 @@ void setup()
 #endif
 #endif
 #if defined(ALMEMO_SENSOR_SENDER) && !defined(ALMEMO_EMULATOR)
+    almemoLedThread = new AlmemoLedThread();
     almemoSenderThread = new AlmemoSenderThread();
 #endif
 

@@ -1,0 +1,134 @@
+#pragma once
+
+#include "concurrency/OSThread.h"
+#include "configuration.h"
+#include <Arduino.h>
+
+/**
+ * AlmemoLedThread
+ *
+ * Treibt die RGB-LED des Sender-Boards (common anode, active LOW) als
+ * Status-Anzeige. Die Blink-Zeiten werden hier erzeugt, entkoppelt vom
+ * AlmemoSenderThread (der bis zu mehreren Sekunden schläft und daher kein
+ * 2/998-ms-Blinken treiben könnte).
+ *
+ *   - GRÜN  : kurzer Puls beim Senden ("green when sending")
+ *   - GELB  : 2 ms AN / 998 ms AUS, wenn kein Sensor gefunden wurde
+ *   - ROT   : 2 ms AN / 998 ms AUS, bei sonstigem Problem (z. B. Lesefehler)
+ *   - AUS   : sonst (idle / schlafend)
+ *
+ * Status wird vom AlmemoSenderThread über setState()/pulseSend() gesetzt.
+ */
+
+#ifndef ALMEMO_LED_BLINK_ON_MS
+#define ALMEMO_LED_BLINK_ON_MS 2
+#endif
+
+#ifndef ALMEMO_LED_BLINK_OFF_MS
+#define ALMEMO_LED_BLINK_OFF_MS 998
+#endif
+
+// Wie lange Grün nach einem Sendevorgang sichtbar gehalten wird.
+// MUSS größer als ALMEMO_LED_IDLE_POLL_MS sein, sonst verschläft der Thread den Puls.
+#ifndef ALMEMO_LED_SEND_HOLD_MS
+#define ALMEMO_LED_SEND_HOLD_MS 150
+#endif
+
+// Poll-Intervall im Ruhezustand (LED aus). Klein genug, um jeden Sende-Puls
+// zuverlässig zu erwischen (< ALMEMO_LED_SEND_HOLD_MS).
+#ifndef ALMEMO_LED_IDLE_POLL_MS
+#define ALMEMO_LED_IDLE_POLL_MS 50
+#endif
+
+enum class AlmemoLedState : uint8_t {
+    Idle,     // nichts anzuzeigen -> LED aus
+    NoSensor, // kein Sensor erkannt -> gelb blinken
+    Error,    // Lese-/sonstiger Fehler -> rot blinken
+};
+
+class AlmemoLedThread : public concurrency::OSThread
+{
+  public:
+    AlmemoLedThread() : OSThread("AlmemoLed")
+    {
+        pinMode(LED_RED, OUTPUT);
+        pinMode(LED_GREEN, OUTPUT);
+        pinMode(LED_BLUE, OUTPUT);
+        allOff();
+    }
+
+    /** Persistenten Anzeige-Zustand setzen (idle / kein Sensor / Fehler). */
+    void setState(AlmemoLedState s) { state = s; }
+
+    /**
+     * Grünen Sende-Puls auslösen bzw. verlängern (jeder Aufruf hält Grün ALMEMO_LED_SEND_HOLD_MS).
+     * Schaltet Grün sofort ein, damit der Flash auch dann sichtbar ist, wenn der LED-Thread
+     * gerade verdrängt wird (z. B. direkt nach dem Boot). Das Ausschalten erledigt runOnce().
+     */
+    void pulseSend()
+    {
+        lastSendMs = millis();
+        setRGB(false, true, false); // grün
+    }
+
+    /** LED sofort ausschalten (z. B. vor Deep Sleep). */
+    void off()
+    {
+        state = AlmemoLedState::Idle;
+        lastSendMs = 0;
+        allOff();
+    }
+
+  protected:
+    int32_t runOnce() override
+    {
+        const uint32_t now = millis();
+
+        // Grün hat Vorrang: kurzer solider Puls rund um jeden Sendevorgang.
+        const uint32_t sinceSend = now - lastSendMs;
+        if (lastSendMs != 0 && sinceSend < ALMEMO_LED_SEND_HOLD_MS) {
+            setRGB(false, true, false); // grün
+            return ALMEMO_LED_SEND_HOLD_MS - sinceSend;
+        }
+
+        switch (state) {
+        case AlmemoLedState::NoSensor:
+            return blink(true, true, false); // gelb = rot + grün
+        case AlmemoLedState::Error:
+            return blink(true, false, false); // rot
+        default:
+            allOff();
+            return ALMEMO_LED_IDLE_POLL_MS;
+        }
+    }
+
+  private:
+    // 2 ms AN / 998 ms AUS für die übergebene Farbe.
+    int32_t blink(bool r, bool g, bool b)
+    {
+        blinkOn = !blinkOn;
+        if (blinkOn) {
+            setRGB(r, g, b);
+            return ALMEMO_LED_BLINK_ON_MS;
+        }
+        allOff();
+        return ALMEMO_LED_BLINK_OFF_MS;
+    }
+
+    static void writeLed(uint8_t pin, bool on) { digitalWrite(pin, on ? LED_STATE_ON : !LED_STATE_ON); }
+
+    static void setRGB(bool r, bool g, bool b)
+    {
+        writeLed(LED_RED, r);
+        writeLed(LED_GREEN, g);
+        writeLed(LED_BLUE, b);
+    }
+
+    static void allOff() { setRGB(false, false, false); }
+
+    AlmemoLedState state = AlmemoLedState::Idle;
+    bool blinkOn = false;
+    uint32_t lastSendMs = 0;
+};
+
+extern AlmemoLedThread *almemoLedThread;

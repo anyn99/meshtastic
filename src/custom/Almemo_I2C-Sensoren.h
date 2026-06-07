@@ -41,6 +41,13 @@ class AlmemoI2CSensor
         TYPE_ANALOG  = 0x09,
     };
 
+    /** Ergebnis eines Messwert-Lesevorgangs. */
+    enum class ReadResult : uint8_t {
+        Ok,           /* gültiger Wert (status=0x40) */
+        NotConnected, /* kein ACK auf dem Bus → Sensor abgesteckt */
+        BadValue,     /* Gerät antwortet, aber status != 0x40 → echter Lesefehler */
+    };
+
     struct SlotInfo {
         bool    present;     /* type != 0xFF */
         uint8_t type;
@@ -62,10 +69,11 @@ class AlmemoI2CSensor
     bool begin(TwoWire &wire);
 
     /**
-     * Misswert von Slot N lesen. Skaliert mit dekodiertem Exponent.
-     * @return true bei gültigem Wert (status=0x40); false sonst.
+     * Messwert von Slot N lesen. Skaliert mit dekodiertem Exponent.
+     * @return ReadResult::Ok bei gültigem Wert; NotConnected wenn der Sensor
+     *         nicht (mehr) ackt; BadValue wenn er antwortet, aber status != 0x40.
      */
-    bool readValue(uint8_t slot, float &out);
+    ReadResult readValue(uint8_t slot, float &out);
 
     const SlotInfo &slot(uint8_t i) const { return slots[i]; }
     const char     *deviceName() const { return name; }

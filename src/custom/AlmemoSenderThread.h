@@ -4,6 +4,7 @@
 #include "configuration.h"
 
 #include "Almemo_I2C-Sensoren.h"
+#include "AlmemoLed.h"
 #include "AlmemoPacket.h"
 #include "Default.h"
 #include "MeshService.h"
@@ -76,6 +77,13 @@ class AlmemoSenderThread : public concurrency::OSThread
     AlmemoI2CSensor almemo;
     Adafruit_SHT31  sht;
 
+    /** Ergebnis eines Sensor-Lesezyklus über alle Quellen hinweg. */
+    enum class ReadStatus : uint8_t {
+        Ok,           // mindestens ein gültiger Wert
+        Disconnected, // Sensor nicht mehr erreichbar → zurück auf SRC_NONE / gelb
+        Error,        // Quelle antwortet, liefert aber keinen gültigen Wert → rot
+    };
+
     SensorSource source = SRC_NONE;
     bool waitingForTxToSleep = false;
     uint32_t waitStartMs = 0;
@@ -109,27 +117,38 @@ class AlmemoSenderThread : public concurrency::OSThread
         return false;
     }
 
-    /** Sensorquelle abfragen; bei Fehler false. */
-    bool readSensor(float &temp, float &humi)
+    /** Sensorquelle abfragen; unterscheidet abgesteckt (Disconnected) von Lesefehler (Error). */
+    ReadStatus readSensor(float &temp, float &humi)
     {
+        using RR = AlmemoI2CSensor::ReadResult;
         switch (source) {
         case SRC_ALMEMO: {
-            bool t_ok = almemo.readValue(0, temp);
-            bool h_ok = almemo.readValue(1, humi);
-            if (!t_ok)
+            RR tr = almemo.readValue(0, temp);
+            RR hr = almemo.readValue(1, humi);
+            if (tr != RR::Ok)
                 temp = NAN;
-            if (!h_ok)
+            if (hr != RR::Ok)
                 humi = NAN;
-            /* Mindestens ein Wert muss gelten, damit der Send-Zyklus läuft. */
-            return t_ok || h_ok;
+            /* Mindestens ein gültiger Wert → Send-Zyklus läuft. */
+            if (tr == RR::Ok || hr == RR::Ok)
+                return ReadStatus::Ok;
+            /* Beide Slots ohne ACK → Sensor abgesteckt. Sonst (Gerät da, aber
+             * status != 0x40) ein echter Lesefehler. */
+            if (tr == RR::NotConnected && hr == RR::NotConnected)
+                return ReadStatus::Disconnected;
+            return ReadStatus::Error;
         }
         case SRC_SHT: {
             temp = sht.readTemperature();
             humi = sht.readHumidity();
-            return !isnan(temp) && !isnan(humi);
+            if (!isnan(temp) && !isnan(humi))
+                return ReadStatus::Ok;
+            /* SHT liefert NaN sowohl bei Abstecken als auch bei Busfehler →
+             * als abgesteckt behandeln, damit neu geprobt wird. */
+            return ReadStatus::Disconnected;
         }
         default:
-            return false;
+            return ReadStatus::Disconnected;
         }
     }
 
@@ -140,6 +159,8 @@ class AlmemoSenderThread : public concurrency::OSThread
     int32_t runOnce() override
     {
         if (waitingForTxToSleep) {
+            if (almemoLedThread)
+                almemoLedThread->pulseSend(); // Grün halten, solange noch gesendet wird
             bool txDone = doPreflightSleep();
             bool timedOut = (millis() - waitStartMs) > ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS;
             if (!txDone && !timedOut)
@@ -151,18 +172,33 @@ class AlmemoSenderThread : public concurrency::OSThread
             uint32_t sleepMs = (elapsed < cycleMs) ? (cycleMs - elapsed) : ALMEMO_SENDER_MIN_SLEEP_MS;
             LOG_DEBUG("AlmemoSender: deep sleep %ums (cycle=%u, awake=%u%s)", sleepMs, cycleMs, elapsed,
                       timedOut ? ", tx timeout" : "");
+            if (almemoLedThread)
+                almemoLedThread->off(); // LED vor Deep Sleep aus
             doDeepSleep(sleepMs, true, true);
             return ALMEMO_SENDER_THREADINTERVAL_MS; // unreached
         }
 
         if (source == SRC_NONE) {
-            if (!probeSensors())
+            if (!probeSensors()) {
+                if (almemoLedThread)
+                    almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
                 return ALMEMO_SENDER_PROBE_INTERVAL_MS;
+            }
         }
 
         float t = NAN, h = NAN;
-        if (!readSensor(t, h)) {
-            LOG_WARN("AlmemoSender: sensor read failed, retry");
+        ReadStatus rs = readSensor(t, h);
+        if (rs != ReadStatus::Ok) {
+            if (rs == ReadStatus::Disconnected) {
+                LOG_WARN("AlmemoSender: sensor disconnected, re-probing");
+                source = SRC_NONE; // zurück auf Anfang → erneutes Probing
+                if (almemoLedThread)
+                    almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
+            } else {
+                LOG_WARN("AlmemoSender: sensor read error (invalid value)");
+                if (almemoLedThread)
+                    almemoLedThread->setState(AlmemoLedState::Error); // rot blinken
+            }
             return ALMEMO_SENDER_PROBE_INTERVAL_MS;
         }
 
@@ -184,6 +220,11 @@ class AlmemoSenderThread : public concurrency::OSThread
         p->decoded.payload.size = sizeof(pkt);
 
         service->sendToMesh(p, RX_SRC_LOCAL);
+
+        if (almemoLedThread) {
+            almemoLedThread->setState(AlmemoLedState::Idle); // Fehlerzustand löschen
+            almemoLedThread->pulseSend();                    // grüner Sende-Puls
+        }
 
         LOG_DEBUG("AlmemoSender [%s] temp: %.2f  humi: %.2f",
                   source == SRC_ALMEMO ? "ALMEMO" : "SHT", pkt.temp, pkt.humi);

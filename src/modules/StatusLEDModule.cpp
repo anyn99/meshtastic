@@ -155,7 +155,9 @@ int32_t StatusLEDModule::runOnce()
 #ifdef PCA_LED_ENABLE
     io.digitalWrite(PCA_LED_ENABLE, CHARGE_LED_state);
 #endif
-#ifdef LED_POWER
+#if defined(LED_POWER) && !defined(ALMEMO_SENSOR_SENDER)
+    // ALMEMO sender drives the RGB LED itself via AlmemoLedThread (green=sending,
+    // yellow=no sensor, red=error); keep the stock heartbeat off the green LED there.
     digitalWrite(LED_POWER, CHARGE_LED_state);
 #endif
 #ifdef LED_PAIRING

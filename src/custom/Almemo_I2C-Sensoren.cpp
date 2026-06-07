@@ -99,23 +99,25 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
     return true;
 }
 
-bool AlmemoI2CSensor::readValue(uint8_t slot, float &out)
+AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readValue(uint8_t slot, float &out)
 {
     if (!wire || slot >= MAX_SLOTS || !slots[slot].present)
-        return false;
+        return ReadResult::NotConnected;
 
     uint8_t buf[4];
+    /* Kein ACK auf 0x40 → Sensor ist vom Bus abgesteckt. */
     if (!readMem(VALUE_ADDR, slot, buf, 4))
-        return false;
+        return ReadResult::NotConnected;
 
     /* buf[0] ist üblicherweise 0x00, buf[1] = Status:
-     *   0x40 → gültig, 0x80 → kein/ungültiger Wert. */
+     *   0x40 → gültig, 0x80 → kein/ungültiger Wert.
+     * Gerät antwortet, liefert aber keinen gültigen Wert → echter Lesefehler. */
     if (buf[1] != 0x40)
-        return false;
+        return ReadResult::BadValue;
 
     int16_t raw = (int16_t)((uint16_t)buf[2] << 8 | buf[3]);
     out = (float)raw * pow10f(slots[slot].exponent);
-    return true;
+    return ReadResult::Ok;
 }
 
 uint8_t AlmemoI2CSensor::numPresent() const
