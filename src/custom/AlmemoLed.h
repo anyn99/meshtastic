@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PowerStatus.h"
 #include "concurrency/OSThread.h"
 #include "configuration.h"
 #include <Arduino.h>
@@ -12,10 +13,11 @@
  * AlmemoSenderThread (der bis zu mehreren Sekunden schläft und daher kein
  * 2/998-ms-Blinken treiben könnte).
  *
- *   - GRÜN  : kurzer Puls beim Senden ("green when sending")
+ *   - BLAU  : kurzer Puls beim Senden
+ *   - GRÜN  : dauerhaft, solange USB angesteckt ist (idle)
  *   - GELB  : 2 ms AN / 998 ms AUS, wenn kein Sensor gefunden wurde
  *   - ROT   : 2 ms AN / 998 ms AUS, bei sonstigem Problem (z. B. Lesefehler)
- *   - AUS   : sonst (idle / schlafend)
+ *   - AUS   : idle ohne USB / schlafend
  *
  * Status wird vom AlmemoSenderThread über setState()/pulseSend() gesetzt.
  */
@@ -68,7 +70,7 @@ class AlmemoLedThread : public concurrency::OSThread
     void pulseSend()
     {
         lastSendMs = millis();
-        setRGB(false, true, false); // grün
+        setRGB(false, false, true); // blau
     }
 
     /** LED sofort ausschalten (z. B. vor Deep Sleep). */
@@ -84,10 +86,10 @@ class AlmemoLedThread : public concurrency::OSThread
     {
         const uint32_t now = millis();
 
-        // Grün hat Vorrang: kurzer solider Puls rund um jeden Sendevorgang.
+        // Blau hat Vorrang: kurzer solider Puls rund um jeden Sendevorgang.
         const uint32_t sinceSend = now - lastSendMs;
         if (lastSendMs != 0 && sinceSend < ALMEMO_LED_SEND_HOLD_MS) {
-            setRGB(false, true, false); // grün
+            setRGB(false, false, true); // blau
             return ALMEMO_LED_SEND_HOLD_MS - sinceSend;
         }
 
@@ -97,7 +99,8 @@ class AlmemoLedThread : public concurrency::OSThread
         case AlmemoLedState::Error:
             return blink(true, false, false); // rot
         default:
-            allOff();
+            // Idle: dauerhaft grün, solange USB angesteckt ist; sonst aus.
+            setRGB(false, powerStatus && powerStatus->getHasUSB(), false);
             return ALMEMO_LED_IDLE_POLL_MS;
         }
     }
