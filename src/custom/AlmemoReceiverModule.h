@@ -32,14 +32,18 @@
  *   0x50, 0x51 — EEPROM emulation (24C02 style, 256 bytes each)
  *   0x40       — Register device (registers 0x00–0x03, one per sensor slot)
  *
- * Multi-node tracking
- * -------------------
- * Up to MAX_NODES (4) ALMEMO senders can be represented simultaneously,
- * one EEPROM sensor-info slot + one live register per node, identified by
- * Meshtastic node_id (last 4 hex chars / short name shown in the slot's Kommentar field).
+ * Multi-value tracking
+ * --------------------
+ * Up to MAX_NODES (4) value streams can be represented simultaneously — the
+ * hard cap of the emulated ALMEMO device (4 EEPROM info blocks + 4 registers).
+ * Each stream is keyed by (node_id, sub), where sub is the sender's ALMEMO
+ * slot index, so one sender can contribute several values (temp, humidity, …),
+ * each landing in its own slot. The slot's Kommentar shows "NNNN.S"
+ * (node short name + sub); unit and exponent come straight from the packet.
  *
- * onPacket() is the entry point from the mesh: allocates a slot for unseen
- * node_ids, updates timestamps and the live temp register for known ones.
+ * onValue() is the entry point from the mesh (once per AlmemoValue): allocates
+ * a slot for unseen (node_id, sub) pairs, updates timestamps and the live
+ * value register for known ones.
  *
  * runOnce() expires slots whose sender went silent longer than its measured
  * inter-arrival interval × 1.05 (or ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS if only
@@ -65,11 +69,14 @@ class I2CSlaveThread : public concurrency::OSThread
     I2CSlaveThread();
 
     /**
-     * Ingest a packet from the mesh. Allocates a slot for new node_ids,
-     * refreshes timestamps and updates the live temp register for known
-     * nodes. Called from the Router task.
+     * Ingest one value from the mesh. Allocates a slot for new (node_id, sub)
+     * pairs (populating the EEPROM info block from unit + exponent), refreshes
+     * timestamps and updates the live value register for known ones.
+     * Called from the Router task, once per AlmemoValue in a packet.
+     *
+     * @param raw  raw int16 reading; physical = raw * 10^exponent.
      */
-    void onPacket(uint32_t node_id, float temp_c);
+    void onValue(uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent, int16_t raw);
 
     /**
      * Safely write into the virtual EEPROM from task context.
@@ -89,6 +96,7 @@ class I2CSlaveThread : public concurrency::OSThread
   private:
     struct NodeEntry {
         uint32_t node_id;
+        uint8_t  sub;          /* sender ALMEMO slot index — part of the stream key */
         uint32_t last_seen_ms;
         uint32_t prev_seen_ms; /* 0 = only one packet seen so far — interval unknown */
         bool     in_use;
@@ -97,10 +105,10 @@ class I2CSlaveThread : public concurrency::OSThread
     NodeEntry nodes[MAX_NODES] = {};
     uint32_t  muteUntilMs = 0;       /* 0 = not muted; otherwise wall-time deadline */
 
-    uint8_t findOrAllocSlot(uint32_t node_id);
-    void    initSlotForNode(uint8_t slot, uint32_t node_id);
+    uint8_t findOrAllocSlot(uint32_t node_id, uint8_t sub);
+    void    initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent);
     void    clearSlot(uint8_t slot);
-    void    writeTempForSlot(uint8_t slot, float t);
+    void    writeRawForSlot(uint8_t slot, int16_t raw);
     void    expireSlot(uint8_t slot);
     void muteI2CFor(uint32_t ms);
     void unmuteI2C();
@@ -145,19 +153,31 @@ class AlmemoReceiverModule : public SinglePortModule
 
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override
     {
-        if (mp.decoded.payload.size != sizeof(AlmemoSensorPacket)) {
-            LOG_WARN("AlmemoRx: unexpected payload size %u (expected %u)",
-                     mp.decoded.payload.size, (unsigned)sizeof(AlmemoSensorPacket));
+        const size_t size = mp.decoded.payload.size;
+        if (size < offsetof(AlmemoSensorPacket, values)) {
+            LOG_WARN("AlmemoRx: runt payload %u", (unsigned)size);
             return ProcessMessage::CONTINUE;
         }
 
         AlmemoSensorPacket pkt;
-        memcpy(&pkt, mp.decoded.payload.bytes, sizeof(pkt));
+        memcpy(&pkt, mp.decoded.payload.bytes, size < sizeof(pkt) ? size : sizeof(pkt));
 
-        slave->onPacket(pkt.node_id, pkt.temp);
+        if (pkt.version != ALMEMO_PACKET_VERSION) {
+            LOG_WARN("AlmemoRx: version %u != %u (sender out of date?)", pkt.version, ALMEMO_PACKET_VERSION);
+            return ProcessMessage::CONTINUE;
+        }
+        if (pkt.count > ALMEMO_MAX_VALUES || size != almemoPacketSize(pkt.count)) {
+            LOG_WARN("AlmemoRx: bad packet (count=%u size=%u)", pkt.count, (unsigned)size);
+            return ProcessMessage::CONTINUE;
+        }
 
-        LOG_INFO("AlmemoRx: node=%08x t=%lu temp=%.2f",
-                 pkt.node_id, (unsigned long)pkt.timestamp, pkt.temp);
+        for (uint8_t i = 0; i < pkt.count; i++) {
+            const AlmemoValue &v = pkt.values[i];
+            slave->onValue(pkt.node_id, v.slot, v.unit, v.exponent, v.raw);
+        }
+
+        LOG_INFO("AlmemoRx: node=%08x t=%lu count=%u",
+                 pkt.node_id, (unsigned long)pkt.timestamp, pkt.count);
 
         return ProcessMessage::CONTINUE;
     }

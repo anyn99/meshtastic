@@ -69,6 +69,14 @@ class AlmemoI2CSensor
     bool begin(TwoWire &wire);
 
     /**
+     * Rohwert (int16, unskaliert) von Slot N lesen — so wie ihn der Sensor
+     * über I2C liefert. Der zugehörige Exponent/Einheit steht in slot(N).
+     * @return ReadResult::Ok bei gültigem Wert; NotConnected wenn der Sensor
+     *         nicht (mehr) ackt; BadValue wenn er antwortet, aber status != 0x40.
+     */
+    ReadResult readRaw(uint8_t slot, int16_t &raw);
+
+    /**
      * Messwert von Slot N lesen. Skaliert mit dekodiertem Exponent.
      * @return ReadResult::Ok bei gültigem Wert; NotConnected wenn der Sensor
      *         nicht (mehr) ackt; BadValue wenn er antwortet, aber status != 0x40.

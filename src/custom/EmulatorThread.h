@@ -90,22 +90,28 @@ class EmulatorThread : public concurrency::OSThread
         }
 #else
         /* --- Mesh packet (sender only) ----------------------------------- */
+        /* temp/humi sind bereits int16 ×100 → roh übernehmen, Exponent -2,
+         * Einheiten °C / %H (native ALMEMO-Darstellung). */
         AlmemoSensorPacket pkt;
+        pkt.version   = ALMEMO_PACKET_VERSION;
         pkt.node_id   = nodeDB->getNodeNum();
         pkt.timestamp = getTime();
-        pkt.temp      = temp / 100.0f;
-        pkt.humi      = humi / 100.0f;
+        pkt.count     = 0;
+        pkt.values[pkt.count++] = AlmemoValue{ 0, { (char)0xF8, 'C' }, -2, temp };
+        pkt.values[pkt.count++] = AlmemoValue{ 1, { '%', 'H' },        -2, humi };
 
         static_assert(sizeof(AlmemoSensorPacket) <= sizeof(meshtastic_MeshPacket::decoded.payload.bytes),
                       "AlmemoSensorPacket too large for MeshPacket payload");
+
+        size_t wireSize = almemoPacketSize(pkt.count);
 
         meshtastic_MeshPacket *p = router->allocForSending();
         p->to                   = NODENUM_BROADCAST;
         p->channel              = ALMEMO_CHANNEL_INDEX;
         p->decoded.portnum      = meshtastic_PortNum_PRIVATE_APP;
         p->priority             = meshtastic_MeshPacket_Priority_DEFAULT;
-        memcpy(p->decoded.payload.bytes, &pkt, sizeof(pkt));
-        p->decoded.payload.size = sizeof(pkt);
+        memcpy(p->decoded.payload.bytes, &pkt, wireSize);
+        p->decoded.payload.size = wireSize;
 
         service->sendToMesh(p, RX_SRC_LOCAL);
 #endif

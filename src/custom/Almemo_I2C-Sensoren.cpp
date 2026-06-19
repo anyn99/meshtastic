@@ -70,7 +70,7 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
     wire = &w;
 
     if (!probe(*wire)) {
-        LOG_DEBUG("AlmemoI2C: no ACK @0x%02x", EEPROM_ADDR);
+        //LOG_DEBUG("AlmemoI2C: no ACK @0x%02x", EEPROM_ADDR);
         return false;
     }
 
@@ -99,7 +99,7 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
     return true;
 }
 
-AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readValue(uint8_t slot, float &out)
+AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readRaw(uint8_t slot, int16_t &raw)
 {
     if (!wire || slot >= MAX_SLOTS || !slots[slot].present)
         return ReadResult::NotConnected;
@@ -115,9 +115,17 @@ AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readValue(uint8_t slot, float &out)
     if (buf[1] != 0x40)
         return ReadResult::BadValue;
 
-    int16_t raw = (int16_t)((uint16_t)buf[2] << 8 | buf[3]);
-    out = (float)raw * pow10f(slots[slot].exponent);
+    raw = (int16_t)((uint16_t)buf[2] << 8 | buf[3]);
     return ReadResult::Ok;
+}
+
+AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readValue(uint8_t slot, float &out)
+{
+    int16_t raw;
+    ReadResult rr = readRaw(slot, raw);
+    if (rr == ReadResult::Ok)
+        out = (float)raw * pow10f(slots[slot].exponent);
+    return rr;
 }
 
 uint8_t AlmemoI2CSensor::numPresent() const

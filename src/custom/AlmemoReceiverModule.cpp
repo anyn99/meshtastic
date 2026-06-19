@@ -62,58 +62,51 @@ bool loopCanSleep()
 
 #define DIGITAL_SENSOR_INFO_SIZE 60u
 
-struct SensorChannelInfo {
-    uint8_t SensorTyp;
-    char    Einheit[3];    /* 2 printable chars + null */
-    char    Kommentar[11]; /* 10 printable chars + null */
-};
-
-static const SensorChannelInfo s_sensors[] = {
-    { 0xFF, { 0x00, 0x00, 0x00 }, { 0x00, 0x00, 0x00, 0x00, 0x00,
-                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
-    { 0x37, { '\xF8', 'C',  0x00 }, "Temp      " },
-    { 0x37, { '%',    'H',  0x00 }, "RelHumidty" },
-    { 0x37, { '%',    'C',  0x00 }, "CO2-Konz  " },
-    { 0x37, { 'p',    'H',  0x00 }, "pH-Wert   " },
-    { 0x37, { 'u',    'S',  0x00 }, "Leitf     " },
-    { 0x37, { 'l',    'x',  0x00 }, "Licht     " },
-};
+/**
+ * Encode a signed power-of-ten exponent into the ALMEMO info-block byte [1]:
+ * high nibble = sign(bit3) | magnitude(bits2-0), low nibble = 0.
+ * E.g. exponent -2 → (0x8|0x2)<<4 = 0xA0 (2 decimal places). Mirrors the
+ * decode in AlmemoI2CSensor::parseSlot().
+ */
+static uint8_t encodeExponentByte(int8_t exponent)
+{
+    uint8_t mag  = (uint8_t)(exponent < 0 ? -exponent : exponent) & 0x07;
+    uint8_t sign = (exponent < 0) ? 0x08 : 0x00;
+    return (uint8_t)((sign | mag) << 4);
+}
 
 /**
- * Fill a DIGITAL_SENSOR_INFO_SIZE-byte sensor info block in the virtual EEPROM.
+ * Fill a DIGITAL_SENSOR_INFO_SIZE-byte sensor info block (digital, type 0x37)
+ * in the virtual EEPROM from unit + exponent + comment carried in the packet.
  *
- * Buffer layout for SensorTyp 0x37:
  *   [0]     SensorTyp  (0x37)
- *   [1]     exponent byte: (8|2)<<4 = 0xA0 → 2 decimal places, negative exponent
+ *   [1]     exponent byte (see encodeExponentByte)
  *   [7]     bitmask 0xFF
- *   [30-31] Einheit (2 bytes)
- *   [32-41] Kommentar (10 bytes)
+ *   [30-31] Einheit (2 bytes, straight from the sensor)
+ *   [32-41] Kommentar (up to 10 bytes)
  *   [59]    block length (60)
- *
- * For SensorTyp 0xFF only [0] is set; all other bytes are zeroed.
  */
-static bool initSensorBuffer(const SensorChannelInfo *sensor, uint8_t *buf, size_t bufLen)
+static void buildSensorInfo(uint8_t *buf, const char unit[2], int8_t exponent, const char *comment)
 {
-    memset(buf, 0, bufLen);
-    if (bufLen < DIGITAL_SENSOR_INFO_SIZE)
-        return false;
-
-    if (sensor->SensorTyp == 0x37) {
-        buf[0]  = sensor->SensorTyp;
-        buf[1]  = (0x8 | 0x2) << 4; /* 0xA0 */
-        buf[7]  = 0xFF;
-        memcpy(&buf[30], sensor->Einheit,    2);
-        memcpy(&buf[32], sensor->Kommentar, 10);
-        buf[59] = DIGITAL_SENSOR_INFO_SIZE;
-        return true;
+    memset(buf, 0, DIGITAL_SENSOR_INFO_SIZE);
+    buf[0]  = 0x37;
+    buf[1]  = encodeExponentByte(exponent);
+    buf[7]  = 0xFF;
+    buf[30] = (uint8_t)unit[0];
+    buf[31] = (uint8_t)unit[1];
+    if (comment) {
+        /* Field is 10 bytes, buf already zeroed; strncpy null-pads and never
+         * writes past 10 even if comment is longer. */
+        strncpy((char *)&buf[32], comment, 10);
     }
+    buf[59] = DIGITAL_SENSOR_INFO_SIZE;
+}
 
-    if (sensor->SensorTyp == 0xFF) {
-        buf[0] = sensor->SensorTyp;
-        return true;
-    }
-
-    return false;
+/** Empty-slot info block: SensorTyp 0xFF, everything else zeroed. */
+static void buildEmptyInfo(uint8_t *buf)
+{
+    memset(buf, 0, DIGITAL_SENSOR_INFO_SIZE);
+    buf[0] = 0xFF;
 }
 
 /* -------------------------------------------------------------------------
@@ -253,7 +246,7 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
 /* -------------------------------------------------------------------------
  * Slot helpers
  *
- * onPacket() (Router task) and runOnce() (I2CSlave OSThread task) both touch
+ * onValue() (Router task) and runOnce() (I2CSlave OSThread task) both touch
  * nodes[]. Both are FreeRTOS tasks running at low frequency (one packet per
  * sender interval, runOnce every ~1 s); a torn read of a 32-bit field is
  * atomic on Cortex-M4 and the worst observable race — runOnce missing or
@@ -264,10 +257,10 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
  * NVIC_DisableIRQ(GPIOTE_IRQn) for ISR-vs-task atomicity.
  * ---------------------------------------------------------------------- */
 
-uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id)
+uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id, uint8_t sub)
 {
     for (uint8_t i = 0; i < MAX_NODES; i++)
-        if (nodes[i].in_use && nodes[i].node_id == node_id) return i;
+        if (nodes[i].in_use && nodes[i].node_id == node_id && nodes[i].sub == sub) return i;
     for (uint8_t i = 0; i < MAX_NODES; i++)
         if (!nodes[i].in_use) return i;
     /* All occupied: evict the LRU node (oldest last_seen_ms). */
@@ -278,39 +271,39 @@ uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id)
     return oldest;
 }
 
-void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id)
+void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent)
 {
-    uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
-    initSensorBuffer(&s_sensors[1], buf, DIGITAL_SENSOR_INFO_SIZE); /* Temp template */
-    /* Overwrite the 10-char Kommentar with the last 4 hex chars of node_id (short name), space-padded. */
+    /* Kommentar = "NNNN.S": last 4 hex chars of node_id (short name) + sub index,
+     * so several values from the same sender stay distinguishable. */
     char comment[11];
-    snprintf(comment, sizeof(comment), "%04X      ", (unsigned)(node_id & 0xFFFF));
-    memcpy(&buf[32], comment, 10);
+    snprintf(comment, sizeof(comment), "%04X.%u", (unsigned)(node_id & 0xFFFF), sub);
+
+    uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
+    buildSensorInfo(buf, unit, exponent, comment);
     writeEeprom(0x50, SLOT_OFFSET[slot], buf, DIGITAL_SENSOR_INFO_SIZE);
 }
 
 void I2CSlaveThread::clearSlot(uint8_t slot)
 {
     uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
-    initSensorBuffer(&s_sensors[0], buf, DIGITAL_SENSOR_INFO_SIZE); /* empty template */
+    buildEmptyInfo(buf);
     writeEeprom(0x50, SLOT_OFFSET[slot], buf, DIGITAL_SENSOR_INFO_SIZE);
     writeReg(slot, ALMEMO_NO_VAL);
 }
 
-void I2CSlaveThread::writeTempForSlot(uint8_t slot, float t)
+void I2CSlaveThread::writeRawForSlot(uint8_t slot, int16_t raw)
 {
-    int16_t tt = (int16_t)(t * 100.0f);
     uint8_t data[REG_MAX] = {
         0x00, 0x40,
-        (uint8_t)((uint16_t)tt >> 8),
-        (uint8_t)((uint16_t)tt & 0xFF),
+        (uint8_t)((uint16_t)raw >> 8),
+        (uint8_t)((uint16_t)raw & 0xFF),
     };
     writeReg(slot, data);
 }
 
 void I2CSlaveThread::expireSlot(uint8_t slot)
 {
-    LOG_INFO("AlmemoRx: slot %u expired (node=%08X)", slot, (unsigned)nodes[slot].node_id);
+    LOG_INFO("AlmemoRx: slot %u expired (node=%08X sub=%u)", slot, (unsigned)nodes[slot].node_id, nodes[slot].sub);
     nodes[slot] = NodeEntry{};
     clearSlot(slot);
     muteI2CFor(ALMEMO_RX_MUTE_MS);
@@ -344,32 +337,34 @@ void I2CSlaveThread::unmuteI2C()
 }
 
 /* -------------------------------------------------------------------------
- * onPacket — mesh -> slot table update (called from Router task)
+ * onValue — mesh -> slot table update (called from Router task)
  * ---------------------------------------------------------------------- */
 
-void I2CSlaveThread::onPacket(uint32_t node_id, float temp_c)
+void I2CSlaveThread::onValue(uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent, int16_t raw)
 {
-    uint8_t slot = findOrAllocSlot(node_id);
+    uint8_t slot = findOrAllocSlot(node_id, sub);
 
     uint32_t now = millis();
     NodeEntry &n = nodes[slot];
-    if (!n.in_use) {
+    if (!n.in_use || n.node_id != node_id || n.sub != sub) {
+        /* New stream (fresh slot or LRU eviction of a different one). */
         n.in_use       = true;
         n.node_id      = node_id;
+        n.sub          = sub;
         n.prev_seen_ms = 0;
         n.last_seen_ms = now;
-        initSlotForNode(slot, node_id);
-        /* Sensor count just increased — force the master to rescan EEPROM by
+        initSlotForNode(slot, node_id, sub, unit, exponent);
+        /* Value count just increased — force the master to rescan EEPROM by
          * going silent on I2C for ALMEMO_RX_MUTE_MS. Same mechanism we use on
          * expiration; expireSlot() already does this for the eviction case. */
         muteI2CFor(ALMEMO_RX_MUTE_MS);
-        LOG_INFO("AlmemoRx: slot %u allocated for node=%08X", slot, (unsigned)node_id);
+        LOG_INFO("AlmemoRx: slot %u allocated for node=%08X sub=%u", slot, (unsigned)node_id, sub);
     } else {
         n.prev_seen_ms = n.last_seen_ms;
         n.last_seen_ms = now;
     }
 
-    writeTempForSlot(slot, temp_c);
+    writeRawForSlot(slot, raw);
 }
 
 /* -------------------------------------------------------------------------
