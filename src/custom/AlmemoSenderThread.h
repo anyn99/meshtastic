@@ -284,6 +284,45 @@ class AlmemoSenderThread : public concurrency::OSThread
         }
     }
 
+#if defined(ALMEMO_EINK)
+    /** Name (max 8, getrimmt) + Wertanzahl in eine Display-Sensorinfo schreiben. */
+    static void setEinkSensor(AlmemoEinkSensorInfo &e, const char *name, uint8_t count)
+    {
+        e.present    = true;
+        e.valueCount = count;
+        size_t n = 0;
+        if (name)
+            for (; n < 8 && name[n]; n++)
+                e.name[n] = name[n];
+        e.name[n] = '\0';
+        while (n > 0 && e.name[n - 1] == ' ') // ALMEMO-Namen sind oft mit Leerzeichen aufgefüllt
+            e.name[--n] = '\0';
+    }
+
+    /** Die 4 Display-Rechtecke (hinten 1/2, vorne 3/4) aus der aktiven Quelle befüllen. */
+    void fillEinkSensors(AlmemoEinkSensorInfo out[4]) const
+    {
+        for (int i = 0; i < 4; i++)
+            out[i] = AlmemoEinkSensorInfo{};
+        switch (source) {
+        case SRC_ALMEMO:
+            setEinkSensor(out[0], almemo.deviceName(), almemo.numPresent());
+            break;
+        case SRC_SHT:
+            setEinkSensor(out[0], "SHT", 2); // Temperatur + Feuchte
+            break;
+        case SRC_ALMEMO_MULTI:
+            // Mux-Kanal ch -> Rechteck ch (feste Position); nur die ersten 4 Kanäle.
+            for (uint8_t ch = 0; ch < 4; ch++)
+                if (muxPresent[ch])
+                    setEinkSensor(out[ch], almemoMux[ch].deviceName(), almemoMux[ch].numPresent());
+            break;
+        default:
+            break;
+        }
+    }
+#endif
+
   public:
     AlmemoSenderThread() : OSThread("AlmemoSender") {}
 
@@ -361,8 +400,10 @@ class AlmemoSenderThread : public concurrency::OSThread
         LOG_DEBUG("AlmemoSender [%s] %u value(s) sent", sourceName(source), pkt.count);
 
 #if defined(ALMEMO_EINK)
-        // E-Paper mit aktuellem Sendeintervall + Timestamp des gerade gesendeten Pakets versorgen
-        almemoEinkPublish(intervalMs() / 1000, pkt.timestamp);
+        // E-Paper mit Intervall + Timestamp + den 4 Sensor-Infos (Name/Wertanzahl) versorgen
+        AlmemoEinkSensorInfo einkSensors[4] = {};
+        fillEinkSensors(einkSensors);
+        almemoEinkPublish(intervalMs() / 1000, pkt.timestamp, einkSensors);
 #endif
 
         if (sensorPowerSaving()) {

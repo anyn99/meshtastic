@@ -43,6 +43,13 @@
 #define ALMEMO_EINK_RST -1
 #endif
 
+// Pro Rechteck (Sensorposition hinten 1/2, vorne 3/4) anzuzeigende Info.
+struct AlmemoEinkSensorInfo {
+    bool present;        // false -> Rechteck zeigt nur die Position
+    uint8_t valueCount;  // Anzahl Messwerte (max 4)
+    char name[9];        // Sensorname, 8 ASCII + NUL
+};
+
 class AlmemoEinkDisplay
 {
     // SPI (global, geteilt mit dem LoRa-Radio) wird in diesem GxEPD2-Fork im Konstruktor gebunden.
@@ -53,14 +60,17 @@ class AlmemoEinkDisplay
 
     uint32_t intervalSecs = 0;  // aktueller Sendeintervall in Sekunden
     uint32_t lastTimestamp = 0; // Unix-Sekunden des letzten Sendens (0 = unbekannt)
+    AlmemoEinkSensorInfo sensors[4] = {}; // 4 Rechtecke: hinten 1/2, vorne 3/4
 
   public:
     // Daten übernehmen und das Display sofort neu zeichnen.
     // Wird synchron aus dem AlmemoSenderThread aufgerufen.
-    void publish(uint32_t intervalSecs, uint32_t unixTimestamp)
+    void publish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensorsIn[4])
     {
         this->intervalSecs = intervalSecs;
         this->lastTimestamp = unixTimestamp;
+        for (int i = 0; i < 4; i++)
+            this->sensors[i] = sensorsIn[i];
 
         if (!inited) {
             // init() macht Reset + Controller-Setup (kurze SPI-Phase) -> Lock nur hier.
@@ -109,49 +119,69 @@ class AlmemoEinkDisplay
         const int H = display.height(); // 200
         const int topH = (H * 2) / 3;   // 133 -> obere zwei Drittel
 
-        // --- obere zwei Drittel: 4 Rechtecke (2x2, Seitenverhältnis ~20:8) ---
-        const int margin = 8;
-        const int gap = 8;
-        const int rectW = (W - 2 * margin - gap) / 2; // 88
-        const int rectH = (rectW * 8) / 20;           // 35  -> 88:35 ~= 20:8
+        // --- obere zwei Drittel: 4 Rechtecke (2x2), Positionsnummer AUSSERHALB
+        //     oben links über jedem Rechteck; im Rechteck "Name (Anzahl)" in Size 2.
+        const int margin = 4;
+        const int colGap = 6;
+        const int rectW = (W - 2 * margin - colGap) / 2; // 93
+        const int numH = 16;                             // Platz über dem Rechteck für die Nummer (Size 2)
+        const int rectH = 40;
+        const int rowGap = 6;
 
-        const int blockH = 2 * rectH + gap;
+        const int blockH = 2 * (numH + rectH) + rowGap;
         const int yTop = (topH - blockH) / 2; // vertikal im oberen Bereich zentriert
 
-        const int xs[2] = {margin, margin + rectW + gap};
-        const int ys[2] = {yTop, yTop + rectH + gap};
+        const int xs[2] = {margin, margin + rectW + colGap};
+        const int numYs[2] = {yTop, yTop + numH + rectH + rowGap}; // Oberkante der Nummer
 
         // Nummerierung: hinten (obere Zeile) 1/2, vorne (untere Zeile) 3/4
         static const uint8_t nums[2][2] = {{1, 2}, {3, 4}};
 
+        display.setTextWrap(false); // langen Namen abschneiden statt umbrechen
+        display.setTextSize(2);
         for (int row = 0; row < 2; row++) {
             for (int col = 0; col < 2; col++) {
                 const int x = xs[col];
-                const int y = ys[row];
-                display.drawRect(x, y, rectW, rectH, GxEPD_BLACK);
-                // Nummer als Label in der oberen linken Ecke (Platz im Rechteck bleibt frei)
-                display.setTextSize(2);
-                display.setCursor(x + 4, y + 4);
-                display.print((int)nums[row][col]);
+                const int rectY = numYs[row] + numH;
+                const uint8_t pos = nums[row][col];
+                const AlmemoEinkSensorInfo &s = sensors[pos - 1];
+
+                // Über dem Rechteck: Positionsnummer links, Anzahl Messwerte rechts
+                display.setCursor(x, numYs[row]);
+                display.print((int)pos);
+                if (s.present) {
+                    char cnt[8];
+                    const int n = snprintf(cnt, sizeof(cnt), "(%u)", s.valueCount);
+                    const int cntW = n * 12; // Size 2: 12px/Zeichen -> rechtsbündig
+                    display.setCursor(x + rectW - cntW, numYs[row]);
+                    display.print(cnt);
+                }
+
+                display.drawRect(x, rectY, rectW, rectH, GxEPD_BLACK);
+
+                // Im Rechteck: nur der Sensorname, vertikal zentriert
+                display.setCursor(x + 4, rectY + (rectH - 16) / 2);
+                display.print(s.present ? s.name : "--");
             }
         }
+        display.setTextWrap(true);
 
         // --- unteres Drittel: Sendeintervall + letzter Timestamp ---
         display.drawFastHLine(0, topH, W, GxEPD_BLACK);
-        display.setTextSize(1);
+        display.setTextSize(2); // doppelt so groß; "UTC" weggelassen, sonst zu breit (200px)
 
         char line[32];
         snprintf(line, sizeof(line), "Intervall: %lu s", (unsigned long)intervalSecs);
-        display.setCursor(6, topH + 12);
+        display.setCursor(4, topH + 10);
         display.print(line);
 
         if (lastTimestamp != 0) {
             const unsigned hh = (lastTimestamp / 3600) % 24, mm = (lastTimestamp / 60) % 60, ss = lastTimestamp % 60;
-            snprintf(line, sizeof(line), "Letzte: %02u:%02u:%02u UTC", hh, mm, ss);
+            snprintf(line, sizeof(line), "Letzte: %02u:%02u:%02u", hh, mm, ss);
         } else {
             snprintf(line, sizeof(line), "Letzte: --:--:--");
         }
-        display.setCursor(6, topH + 34);
+        display.setCursor(4, topH + 36);
         display.print(line);
     }
 };
@@ -159,7 +189,8 @@ class AlmemoEinkDisplay
 /**
  * Display mit neuen Daten aktualisieren (zeichnet synchron). Vom AlmemoSenderThread
  * aufzurufen, sobald neue Daten gesendet wurden oder Sensoren an-/abgesteckt werden.
+ * sensors[4] = die 4 Rechteck-Positionen (hinten 1/2, vorne 3/4).
  */
-void almemoEinkPublish(uint32_t intervalSecs, uint32_t unixTimestamp);
+void almemoEinkPublish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensors[4]);
 
 #endif // ALMEMO_EINK
