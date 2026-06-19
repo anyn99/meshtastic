@@ -181,6 +181,33 @@ class AlmemoSenderThread : public concurrency::OSThread
         return true;
     }
 
+    /**
+     * Belegung der Mux-Kanäle erneut prüfen (Plug/Unplug einzelner Kanäle).
+     * Neu erkannte Kanäle werden per begin() eingelesen, weggefallene markiert.
+     * Wird beim Senden aufgerufen (kein separates Polling).
+     */
+    void refreshMux()
+    {
+        if (!tcaPresent()) { // ganzer Mux weg
+            for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++)
+                muxPresent[ch] = false;
+            muxCount = 0;
+            return;
+        }
+        muxCount = 0;
+        for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++) {
+            tcaSelect(ch);
+            const bool present = AlmemoI2CSensor::probe(Wire);
+            if (present && !muxPresent[ch])
+                muxPresent[ch] = almemoMux[ch].begin(Wire); // neu angesteckt -> Metadaten laden
+            else if (!present)
+                muxPresent[ch] = false; // abgesteckt
+            if (muxPresent[ch])
+                muxCount++;
+        }
+        tcaDeselect();
+    }
+
     /** Mux @0x70 zuerst, dann ALMEMO @0x50, dann SHT @0x44. */
     bool probeSensors()
     {
@@ -321,6 +348,17 @@ class AlmemoSenderThread : public concurrency::OSThread
             break;
         }
     }
+
+    // Timestamp des letzten gesendeten Pakets (für Display-Updates ohne neues Senden).
+    uint32_t lastSentTimestamp = 0;
+
+    /** E-Paper mit dem aktuellen Sensor-/Sendestand neu zeichnen. */
+    void publishEinkNow(uint32_t timestamp)
+    {
+        AlmemoEinkSensorInfo s[4] = {};
+        fillEinkSensors(s);
+        almemoEinkPublish(intervalMs() / 1000, timestamp, s);
+    }
 #endif
 
   public:
@@ -357,6 +395,22 @@ class AlmemoSenderThread : public concurrency::OSThread
             }
         }
 
+        // Mux: einzelne Kanäle beim Senden neu prüfen (Plug/Unplug). Fällt alles weg,
+        // wie Disconnect behandeln und das Display einmalig leeren.
+        if (source == SRC_ALMEMO_MULTI) {
+            refreshMux();
+            if (muxCount == 0) {
+                LOG_WARN("AlmemoSender: all mux sensors gone, re-probing");
+                source = SRC_NONE;
+                if (almemoLedThread)
+                    almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
+#if defined(ALMEMO_EINK)
+                publishEinkNow(lastSentTimestamp); // leeres Display
+#endif
+                return ALMEMO_SENDER_PROBE_INTERVAL_MS;
+            }
+        }
+
         AlmemoSensorPacket pkt;
         pkt.version   = ALMEMO_PACKET_VERSION;
         pkt.node_id   = nodeDB->getNodeNum();
@@ -369,6 +423,9 @@ class AlmemoSenderThread : public concurrency::OSThread
                 source = SRC_NONE; // zurück auf Anfang → erneutes Probing
                 if (almemoLedThread)
                     almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
+#if defined(ALMEMO_EINK)
+                publishEinkNow(lastSentTimestamp); // Sensor weg -> Display leeren
+#endif
             } else {
                 LOG_WARN("AlmemoSender: sensor read error (invalid value)");
                 if (almemoLedThread)
@@ -401,9 +458,8 @@ class AlmemoSenderThread : public concurrency::OSThread
 
 #if defined(ALMEMO_EINK)
         // E-Paper mit Intervall + Timestamp + den 4 Sensor-Infos (Name/Wertanzahl) versorgen
-        AlmemoEinkSensorInfo einkSensors[4] = {};
-        fillEinkSensors(einkSensors);
-        almemoEinkPublish(intervalMs() / 1000, pkt.timestamp, einkSensors);
+        lastSentTimestamp = pkt.timestamp;
+        publishEinkNow(pkt.timestamp);
 #endif
 
         if (sensorPowerSaving()) {
