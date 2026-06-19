@@ -18,8 +18,11 @@
  * bzw. bei Sensorwechsel). Es wird also nur gezeichnet, wenn sich etwas ändert.
  *
  * Hardware: SPI-Bus geteilt mit dem LoRa-Radio (SCK=D8, MOSI=D10; MISO ungenutzt).
- * Jeder Zugriff läuft unter dem Firmware-spiLock. RES-Pin am Modul MUSS fest auf
- * 3,3 V liegen (RST=-1 -> nur Software-Reset); floatend hängt der SSD1681 im Reset.
+ * RES braucht einen echten GPIO mit Reset-Puls (Pins via platformio.ini-Flags).
+ *
+ * SPI-Zugriff läuft unter dem Firmware-spiLock, ABER der ~2.6s Full-Refresh wird
+ * asynchron gefahren: Lock nur um die kurzen SPI-Schreibvorgänge, das BUSY-Warten
+ * läuft lock-frei (epd2.isBusy()), damit der Radio-Task den Bus nicht verliert.
  *
  * Layout:
  *   - obere zwei Drittel: 4 nummerierte Rechtecke (2x2, ~20:8).
@@ -40,11 +43,6 @@
 #define ALMEMO_EINK_RST -1
 #endif
 
-// Nach so vielen Fast-Updates wird ein sauberer Full-Refresh gemacht (entfernt Ghosting).
-#ifndef ALMEMO_EINK_FULL_EVERY
-#define ALMEMO_EINK_FULL_EVERY 10
-#endif
-
 class AlmemoEinkDisplay
 {
     // SPI (global, geteilt mit dem LoRa-Radio) wird in diesem GxEPD2-Fork im Konstruktor gebunden.
@@ -52,7 +50,6 @@ class AlmemoEinkDisplay
         GxEPD2_154_D67(ALMEMO_EINK_CS, ALMEMO_EINK_DC, ALMEMO_EINK_RST, ALMEMO_EINK_BUSY, SPI)};
 
     bool inited = false;
-    uint8_t updatesSinceFull = 0;
 
     uint32_t intervalSecs = 0;  // aktueller Sendeintervall in Sekunden
     uint32_t lastTimestamp = 0; // Unix-Sekunden des letzten Sendens (0 = unbekannt)
@@ -65,36 +62,45 @@ class AlmemoEinkDisplay
         this->intervalSecs = intervalSecs;
         this->lastTimestamp = unixTimestamp;
 
-        // E-Paper teilt sich den LoRa-SPI-Bus -> spiLock über den ganzen Zugriff halten.
-        concurrency::LockGuard g(spiLock);
-
         if (!inited) {
+            // init() macht Reset + Controller-Setup (kurze SPI-Phase) -> Lock nur hier.
+            concurrency::LockGuard g(spiLock);
             display.init(0, true, 10, false);
-            display.setRotation(3); // 180° gegenüber Rotation 1 (Modul-Einbaulage, Bild stand auf dem Kopf)
+            display.setRotation(3); // 180° (Modul-Einbaulage, Bild stand sonst auf dem Kopf)
             inited = true;
         }
         render();
     }
 
   private:
+    // Immer Full-Refresh, aber ASYNCHRON: Der ~2.6s BUSY-Wait darf den geteilten
+    // SPI-Bus nicht blockieren, sonst läuft die Tx-Nachbereitung des Radios
+    // (setStandby) in den spiLock-Timeout (RadioLib err=-705 -> assert).
+    // Mit -DUSE_EINK_DYNAMICDISPLAY überspringt nextPage() das interne BUSY-Warten;
+    // wir warten selbst über epd2.isBusy() (nur digitalRead, kein SPI) OHNE Lock.
     void render()
     {
-        // Periodisch Full-Refresh (auch beim allerersten Bild), sonst Fast/Partial.
-        const bool fullRefresh = (updatesSinceFull == 0);
-        if (fullRefresh)
+        // 1) Bild in den RAM-Framebuffer + Full-Refresh anstoßen (kurzer Lock, nur SPI-Schreiben).
+        {
+            concurrency::LockGuard g(spiLock);
             display.setFullWindow();
-        else
-            display.setPartialWindow(0, 0, display.width(), display.height());
+            display.firstPage();
+            do {
+                display.fillScreen(GxEPD_WHITE);
+                display.setTextColor(GxEPD_BLACK);
+                drawContents();
+            } while (display.nextPage()); // async: startet Refresh, kehrt sofort zurück
+        }
 
-        display.firstPage();
-        do {
-            display.fillScreen(GxEPD_WHITE);
-            display.setTextColor(GxEPD_BLACK);
-            drawContents();
-        } while (display.nextPage());
+        // 2) Auf den Panel-Refresh warten OHNE Lock -> Radio kann den Bus nutzen.
+        while (display.epd2.isBusy())
+            delay(10);
 
-        if (++updatesSinceFull >= ALMEMO_EINK_FULL_EVERY)
-            updatesSinceFull = 0;
+        // 3) Abschluss (writeImageAgain + powerOff) -> wieder kurzer Lock.
+        {
+            concurrency::LockGuard g(spiLock);
+            display.endAsyncFull();
+        }
     }
 
     void drawContents()
