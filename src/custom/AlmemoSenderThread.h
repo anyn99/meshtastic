@@ -6,6 +6,9 @@
 #include "Almemo_I2C-Sensoren.h"
 #include "AlmemoLed.h"
 #include "AlmemoPacket.h"
+#if defined(ALMEMO_EINK)
+#include "AlmemoEinkDisplay.h"
+#endif
 #include "Default.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -356,6 +359,11 @@ class AlmemoSenderThread : public concurrency::OSThread
         }
 
         LOG_DEBUG("AlmemoSender [%s] %u value(s) sent", sourceName(source), pkt.count);
+
+#if defined(ALMEMO_EINK)
+        // E-Paper mit aktuellem Sendeintervall + Timestamp des gerade gesendeten Pakets versorgen
+        almemoEinkPublish(intervalMs() / 1000, pkt.timestamp);
+#endif
 
         if (sensorPowerSaving()) {
             waitingForTxToSleep = true;
