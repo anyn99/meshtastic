@@ -27,7 +27,7 @@
  * Layout:
  *   - obere zwei Drittel: 4 nummerierte Rechtecke (2x2, ~20:8).
  *       hinten (obere Zeile) = 1 / 2, vorne (untere Zeile) = 3 / 4.
- *   - unteres Drittel: aktueller Sendeintervall + letzter Timestamp.
+ *   - unteres Drittel: aktueller Sendeintervall + Sendezähler.
  */
 
 #ifndef ALMEMO_EINK_CS
@@ -56,8 +56,8 @@ class AlmemoEinkDisplay
     GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display{
         GxEPD2_154_D67(ALMEMO_EINK_CS, ALMEMO_EINK_DC, ALMEMO_EINK_RST, ALMEMO_EINK_BUSY, SPI)};
 
-    uint32_t intervalSecs = 0;  // aktueller Sendeintervall in Sekunden
-    uint32_t lastTimestamp = 0; // Unix-Sekunden des letzten Sendens (0 = unbekannt)
+    uint32_t intervalSecs = 0; // aktueller Sendeintervall in Sekunden
+    uint32_t sendCount = 0;    // Anzahl gesendeter Pakete (persistent über Warmstarts)
     AlmemoEinkSensorInfo sensors[4] = {}; // 4 Rechtecke: hinten 1/2, vorne 3/4
 
   public:
@@ -80,10 +80,10 @@ class AlmemoEinkDisplay
 
     // Daten übernehmen und das Display sofort neu zeichnen.
     // Wird synchron aus dem AlmemoSenderThread aufgerufen.
-    void publish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensorsIn[4])
+    void publish(uint32_t intervalSecs, uint32_t sendCount, const AlmemoEinkSensorInfo sensorsIn[4])
     {
         this->intervalSecs = intervalSecs;
-        this->lastTimestamp = unixTimestamp;
+        this->sendCount = sendCount;
         for (int i = 0; i < 4; i++)
             this->sensors[i] = sensorsIn[i];
 
@@ -177,21 +177,16 @@ class AlmemoEinkDisplay
         }
         display.setTextWrap(true);
 
-        // --- unteres Drittel: Sendeintervall + letzter Timestamp ---
+        // --- unteres Drittel: Sendeintervall + Sendezähler ---
         display.drawFastHLine(0, topH, W, GxEPD_BLACK);
-        display.setTextSize(2); // doppelt so groß; "UTC" weggelassen, sonst zu breit (200px)
+        display.setTextSize(2); // doppelt so groß
 
         char line[32];
         snprintf(line, sizeof(line), "Intervall: %lu s", (unsigned long)intervalSecs);
         display.setCursor(4, topH + 10);
         display.print(line);
 
-        if (lastTimestamp != 0) {
-            const unsigned hh = (lastTimestamp / 3600) % 24, mm = (lastTimestamp / 60) % 60, ss = lastTimestamp % 60;
-            snprintf(line, sizeof(line), "Letzte: %02u:%02u:%02u", hh, mm, ss);
-        } else {
-            snprintf(line, sizeof(line), "Letzte: --:--:--");
-        }
+        snprintf(line, sizeof(line), "Gesendet: %lu", (unsigned long)sendCount);
         display.setCursor(4, topH + 36);
         display.print(line);
     }
@@ -202,7 +197,7 @@ class AlmemoEinkDisplay
  * aufzurufen, sobald neue Daten gesendet wurden oder Sensoren an-/abgesteckt werden.
  * sensors[4] = die 4 Rechteck-Positionen (hinten 1/2, vorne 3/4).
  */
-void almemoEinkPublish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensors[4]);
+void almemoEinkPublish(uint32_t intervalSecs, uint32_t sendCount, const AlmemoEinkSensorInfo sensors[4]);
 
 // Display früh konstruieren (-> Konstruktor zeichnet den leeren Bildschirm). Aus setup()
 // vor den langsamen fs-/Radio-Inits aufzurufen.

@@ -45,6 +45,32 @@ extern "C" {
 #define ALMEMO_CHANNEL_INDEX 1
 #endif
 
+#if defined(ALMEMO_EINK)
+// Persistenter Sendezähler über Warmstarts hinweg. Der getimte Deep-Sleep ist in Wahrheit
+// delay()+NVIC_SystemReset() (ein Warmstart, bei dem das SRAM erhalten bleibt); nur ein
+// echter Power-Cycle löscht es. Die Variable liegt in .noinit (vom Startup NICHT genullt,
+// siehe nrf52840_s140_v7.ld), ein Magic schützt gegen kalt gestartetes (zufälliges) RAM.
+static constexpr uint32_t ALMEMO_SEND_COUNT_MAGIC = 0x414c4d43; // "ALMC"
+struct AlmemoSendCount {
+    uint32_t magic;
+    uint32_t count;
+    uint32_t check; // magic ^ count ^ 0xA5A5A5A5
+};
+__attribute__((section(".noinit"))) static AlmemoSendCount almemoSendCount;
+
+// Zähler um 1 erhöhen und zurückgeben; bei kaltem/korruptem RAM bei 1 beginnen.
+static uint32_t almemoNextSendCount()
+{
+    if (almemoSendCount.magic != ALMEMO_SEND_COUNT_MAGIC ||
+        almemoSendCount.check != (ALMEMO_SEND_COUNT_MAGIC ^ almemoSendCount.count ^ 0xA5A5A5A5u))
+        almemoSendCount.count = 0;
+    almemoSendCount.count++;
+    almemoSendCount.magic = ALMEMO_SEND_COUNT_MAGIC;
+    almemoSendCount.check = ALMEMO_SEND_COUNT_MAGIC ^ almemoSendCount.count ^ 0xA5A5A5A5u;
+    return almemoSendCount.count;
+}
+#endif
+
 #ifndef ALMEMO_SENDER_DEFAULT_INTERVAL_SECS
 #define ALMEMO_SENDER_DEFAULT_INTERVAL_SECS 30
 #endif
@@ -349,15 +375,15 @@ class AlmemoSenderThread : public concurrency::OSThread
         }
     }
 
-    // Timestamp des letzten gesendeten Pakets (für Display-Updates ohne neues Senden).
-    uint32_t lastSentTimestamp = 0;
+    // Sendezähler-Stand des letzten gesendeten Pakets (für Display-Updates ohne neues Senden).
+    uint32_t lastSendCount = 0;
 
     /** E-Paper mit dem aktuellen Sensor-/Sendestand neu zeichnen. */
-    void publishEinkNow(uint32_t timestamp)
+    void publishEinkNow(uint32_t sendCount)
     {
         AlmemoEinkSensorInfo s[4] = {};
         fillEinkSensors(s);
-        almemoEinkPublish(intervalMs() / 1000, timestamp, s);
+        almemoEinkPublish(intervalMs() / 1000, sendCount, s);
     }
 #endif
 
@@ -365,8 +391,21 @@ class AlmemoSenderThread : public concurrency::OSThread
     AlmemoSenderThread() : OSThread("AlmemoSender") {}
 
   protected:
+    // Verbleibende Wartezeit bis zum nächsten Zyklus: Intervall minus bereits verstrichener
+    // Zeit, min. ALMEMO_SENDER_MIN_SLEEP_MS. Beide Pfade teilen sich diese Formel; sie messen
+    // die verstrichene Zeit nur unterschiedlich (siehe Aufrufstellen) – beides ms-genau über
+    // millis(). Bewusst KEIN getTime(): das wäre nur sekundengenau. millis() startet nach dem
+    // Warmstart bei 0 und ist damit pro Boot die präzise Referenz für die Wachzeit.
+    static uint32_t remainingCycleMs(uint32_t elapsedMs)
+    {
+        const uint32_t iv = intervalMs();
+        return (elapsedMs < iv) ? (iv - elapsedMs) : ALMEMO_SENDER_MIN_SLEEP_MS;
+    }
+
     int32_t runOnce() override
     {
+        const uint32_t cycleStartMs = millis();
+
         if (waitingForTxToSleep) {
             if (almemoLedThread)
                 almemoLedThread->pulseSend(); // Grün halten, solange noch gesendet wird
@@ -376,10 +415,12 @@ class AlmemoSenderThread : public concurrency::OSThread
                 return ALMEMO_SENDER_THREADINTERVAL_MS;
 
             waitingForTxToSleep = false;
-            uint32_t cycleMs = intervalMs();
-            uint32_t elapsed = millis();
-            uint32_t sleepMs = (elapsed < cycleMs) ? (cycleMs - elapsed) : ALMEMO_SENDER_MIN_SLEEP_MS;
-            LOG_DEBUG("AlmemoSender: deep sleep %ums (cycle=%u, awake=%u%s)", sleepMs, cycleMs, elapsed,
+            // Der Sleep-Zyklus liegt komplett in EINEM Boot (Wake -> Senden -> Sleep) und
+            // millis() ist nach dem Warmstart 0, daher ist millis() hier direkt die reine
+            // Wachzeit dieses Zyklus.
+            const uint32_t awakeMs = millis();
+            const uint32_t sleepMs = remainingCycleMs(awakeMs);
+            LOG_DEBUG("AlmemoSender: deep sleep %ums (cycle=%u, awake=%u%s)", sleepMs, intervalMs(), awakeMs,
                       timedOut ? ", tx timeout" : "");
             if (almemoLedThread)
                 almemoLedThread->off(); // LED vor Deep Sleep aus
@@ -405,7 +446,7 @@ class AlmemoSenderThread : public concurrency::OSThread
                 if (almemoLedThread)
                     almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
 #if defined(ALMEMO_EINK)
-                publishEinkNow(lastSentTimestamp); // leeres Display
+                publishEinkNow(lastSendCount); // leeres Display, Zähler unverändert
 #endif
                 return ALMEMO_SENDER_PROBE_INTERVAL_MS;
             }
@@ -424,7 +465,7 @@ class AlmemoSenderThread : public concurrency::OSThread
                 if (almemoLedThread)
                     almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
 #if defined(ALMEMO_EINK)
-                publishEinkNow(lastSentTimestamp); // Sensor weg -> Display leeren
+                publishEinkNow(lastSendCount); // Sensor weg -> Display leeren, Zähler unverändert
 #endif
             } else {
                 LOG_WARN("AlmemoSender: sensor read error (invalid value)");
@@ -457,9 +498,10 @@ class AlmemoSenderThread : public concurrency::OSThread
         LOG_DEBUG("AlmemoSender [%s] %u value(s) sent", sourceName(source), pkt.count);
 
 #if defined(ALMEMO_EINK)
-        // E-Paper mit Intervall + Timestamp + den 4 Sensor-Infos (Name/Wertanzahl) versorgen
-        lastSentTimestamp = pkt.timestamp;
-        publishEinkNow(pkt.timestamp);
+        // E-Paper mit Intervall + Sendezähler + den 4 Sensor-Infos (Name/Wertanzahl) versorgen.
+        // Der Zähler überlebt die Deep-Sleep-Warmstarts (.noinit) und wird nur hier hochgezählt.
+        lastSendCount = almemoNextSendCount();
+        publishEinkNow(lastSendCount);
 #endif
 
         if (sensorPowerSaving()) {
@@ -467,6 +509,11 @@ class AlmemoSenderThread : public concurrency::OSThread
             waitStartMs = millis();
             return ALMEMO_SENDER_THREADINTERVAL_MS;
         }
-        return intervalMs();
+
+        // Echten Sendeabstand halten: die Laufzeit dieses Zyklus (Sensor-Lesen, Senden,
+        // E-Paper-Refresh ~2,6 s) vom Intervall abziehen – sonst wäre der Abstand
+        // intervalMs() + Arbeitszeit. Kein Reboot hier, daher relativ zu cycleStartMs
+        // (die Thread-Delay-Pause aus dem Vorzyklus liegt davor und zählt nicht mit).
+        return remainingCycleMs(millis() - cycleStartMs);
     }
 };

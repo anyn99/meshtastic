@@ -18,9 +18,9 @@ void almemoEinkInitBlank()
     einkDisplay(); // erzwingt die Konstruktion -> Display kommt leer hoch
 }
 
-void almemoEinkPublish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensors[4])
+void almemoEinkPublish(uint32_t intervalSecs, uint32_t sendCount, const AlmemoEinkSensorInfo sensors[4])
 {
-    einkDisplay().publish(intervalSecs, unixTimestamp, sensors);
+    einkDisplay().publish(intervalSecs, sendCount, sensors);
 }
 
 #endif // ALMEMO_EINK
