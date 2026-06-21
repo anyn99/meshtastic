@@ -96,7 +96,13 @@ static const uint8_t A5 = PIN_A5;
 #define LED_GREEN (13)
 #define LED_BLUE (12)
 
-#define PIN_LED1 LED_GREEN // PIN_LED1 is used in src/platform/nrf52/architecture.h to define LED_POWER
+// PIN_LED1 wird in src/platform/nrf52/architecture.h zu LED_POWER (Power-/Startup-LED).
+// Der ALMEMO-Sender soll KEINE Power-LED haben -> PIN_LED1 hier bewusst nicht definieren,
+// damit LED_POWER undefiniert bleibt und beim Boot keine LED angeht. Die RGB-LED nutzt
+// LED_RED/LED_GREEN/LED_BLUE direkt und ist davon unberuehrt.
+#ifndef ALMEMO_SENSOR_SENDER
+#define PIN_LED1 LED_GREEN
+#endif
 #define PIN_LED2 LED_BLUE
 #define PIN_LED3 LED_RED
 

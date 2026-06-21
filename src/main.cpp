@@ -16,6 +16,9 @@ static EmulatorThread *emulatorThread;
 AlmemoLedThread *almemoLedThread;
 static AlmemoSenderThread *almemoSenderThread;
 #endif
+#if defined(ALMEMO_EINK)
+#include "custom/AlmemoEinkDisplay.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
@@ -340,6 +343,15 @@ void setup()
     // Defined in variant.cpp for early init code
     earlyInitVariant();
 
+#if defined(ALMEMO_EINK)
+    // E-Paper so früh wie möglich mit leerem Bild hochfahren – noch VOR consoleInit(), dessen
+    // SerialConsole-Ctor auf nRF52 bis zu 5 s auf eine USB-Serial-Verbindung wartet
+    // (while (!Port) ...). Liefe der E-Paper-Init danach, erschiene der leere Screen erst nach
+    // diesem Wait. initSPI() (legt nur den spiLock an) ziehen wir dafür hier mit hoch.
+    initSPI();
+    almemoEinkInitBlank();
+#endif
+
 #if defined(PIN_POWER_EN)
     pinMode(PIN_POWER_EN, OUTPUT);
     digitalWrite(PIN_POWER_EN, HIGH);
@@ -472,7 +484,10 @@ void setup()
     LOG_INFO("Wait for peripherals to stabilize");
     delay(PERIPHERAL_WARMUP_MS);
 #endif
+    // Beim ALMEMO_EINK-Build wird der spiLock bereits oben (vor consoleInit) erzeugt.
+#if !defined(ALMEMO_EINK)
     initSPI();
+#endif
 
     OSThread::setup();
 

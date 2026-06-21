@@ -1,8 +1,8 @@
 #pragma once
 
-#include "PowerStatus.h"
 #include "concurrency/OSThread.h"
 #include "configuration.h"
+#include "power/PowerHAL.h"
 #include <Arduino.h>
 
 /**
@@ -14,10 +14,10 @@
  * 2/998-ms-Blinken treiben könnte).
  *
  *   - BLAU  : kurzer Puls beim Senden
- *   - GRÜN  : dauerhaft, solange USB angesteckt ist (idle)
- *   - GELB  : 2 ms AN / 998 ms AUS, wenn kein Sensor gefunden wurde
- *   - ROT   : 2 ms AN / 998 ms AUS, bei sonstigem Problem (z. B. Lesefehler)
- *   - AUS   : idle ohne USB / schlafend
+ *   - GRÜN  : dauerhaft, solange USB angesteckt ist — auch zwischen den Blinks
+ *   - GELB  : kurzer Blitz (2 ms), wenn kein Sensor gefunden wurde
+ *   - ROT   : kurzer Blitz (2 ms), bei sonstigem Problem (z. B. Lesefehler)
+ *   - AUS   : nur ohne USB / schlafend
  *
  * Status wird vom AlmemoSenderThread über setState()/pulseSend() gesetzt.
  */
@@ -99,14 +99,15 @@ class AlmemoLedThread : public concurrency::OSThread
         case AlmemoLedState::Error:
             return blink(true, false, false); // rot
         default:
-            // Idle: dauerhaft grün, solange USB angesteckt ist; sonst aus.
-            setRGB(false, powerStatus && powerStatus->getHasUSB(), false);
+            // Idle: dauerhaft grün, solange USB (VBUS) anliegt; sonst aus.
+            setRGB(false, powerHAL_isVBUSConnected(), false);
             return ALMEMO_LED_IDLE_POLL_MS;
         }
     }
 
   private:
-    // 2 ms AN / 998 ms AUS für die übergebene Farbe.
+    // 2 ms Farbe AN / 998 ms "Aus". In der Aus-Phase grün, solange USB (VBUS) anliegt,
+    // damit die LED durchgehend grün leuchtet und nur kurz rot/gelb blitzt.
     int32_t blink(bool r, bool g, bool b)
     {
         blinkOn = !blinkOn;
@@ -114,7 +115,7 @@ class AlmemoLedThread : public concurrency::OSThread
             setRGB(r, g, b);
             return ALMEMO_LED_BLINK_ON_MS;
         }
-        allOff();
+        setRGB(false, powerHAL_isVBUSConnected(), false);
         return ALMEMO_LED_BLINK_OFF_MS;
     }
 

@@ -56,13 +56,28 @@ class AlmemoEinkDisplay
     GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display{
         GxEPD2_154_D67(ALMEMO_EINK_CS, ALMEMO_EINK_DC, ALMEMO_EINK_RST, ALMEMO_EINK_BUSY, SPI)};
 
-    bool inited = false;
-
     uint32_t intervalSecs = 0;  // aktueller Sendeintervall in Sekunden
     uint32_t lastTimestamp = 0; // Unix-Sekunden des letzten Sendens (0 = unbekannt)
     AlmemoEinkSensorInfo sensors[4] = {}; // 4 Rechtecke: hinten 1/2, vorne 3/4
 
   public:
+    // Controller einmalig initialisieren und sofort einen komplett leeren (weißen) Bildschirm
+    // zeichnen. Die Instanz wird als funktion-lokales static erst zur Laufzeit konstruiert
+    // (dann steht SPI/Arduino bereit -> kein static-init-order-Problem) und kann so über
+    // almemoEinkInitBlank() schon sehr früh – vor den langsamen fs-/Radio-Inits – aufgebaut
+    // werden.
+    AlmemoEinkDisplay()
+    {
+        SPI.begin(); // Radio-Init kommt erst später; den geteilten Bus hier selbst starten.
+        {
+            // init() macht Reset + Controller-Setup (kurze SPI-Phase) -> Lock nur hier.
+            concurrency::LockGuard g(spiLock);
+            display.init(0, true, 10, false);
+            display.setRotation(3); // 180° (Modul-Einbaulage, Bild stand sonst auf dem Kopf)
+        }
+        render(false); // leerer weißer Startbildschirm (ohne Inhalt)
+    }
+
     // Daten übernehmen und das Display sofort neu zeichnen.
     // Wird synchron aus dem AlmemoSenderThread aufgerufen.
     void publish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensorsIn[4])
@@ -72,13 +87,6 @@ class AlmemoEinkDisplay
         for (int i = 0; i < 4; i++)
             this->sensors[i] = sensorsIn[i];
 
-        if (!inited) {
-            // init() macht Reset + Controller-Setup (kurze SPI-Phase) -> Lock nur hier.
-            concurrency::LockGuard g(spiLock);
-            display.init(0, true, 10, false);
-            display.setRotation(3); // 180° (Modul-Einbaulage, Bild stand sonst auf dem Kopf)
-            inited = true;
-        }
         render();
     }
 
@@ -88,7 +96,8 @@ class AlmemoEinkDisplay
     // (setStandby) in den spiLock-Timeout (RadioLib err=-705 -> assert).
     // Mit -DUSE_EINK_DYNAMICDISPLAY überspringt nextPage() das interne BUSY-Warten;
     // wir warten selbst über epd2.isBusy() (nur digitalRead, kein SPI) OHNE Lock.
-    void render()
+    // drawData=false -> nur weißer Bildschirm (leerer Startbildschirm), sonst mit Inhalt.
+    void render(bool drawData = true)
     {
         // 1) Bild in den RAM-Framebuffer + Full-Refresh anstoßen (kurzer Lock, nur SPI-Schreiben).
         {
@@ -97,8 +106,10 @@ class AlmemoEinkDisplay
             display.firstPage();
             do {
                 display.fillScreen(GxEPD_WHITE);
-                display.setTextColor(GxEPD_BLACK);
-                drawContents();
+                if (drawData) {
+                    display.setTextColor(GxEPD_BLACK);
+                    drawContents();
+                }
             } while (display.nextPage()); // async: startet Refresh, kehrt sofort zurück
         }
 
@@ -192,5 +203,9 @@ class AlmemoEinkDisplay
  * sensors[4] = die 4 Rechteck-Positionen (hinten 1/2, vorne 3/4).
  */
 void almemoEinkPublish(uint32_t intervalSecs, uint32_t unixTimestamp, const AlmemoEinkSensorInfo sensors[4]);
+
+// Display früh konstruieren (-> Konstruktor zeichnet den leeren Bildschirm). Aus setup()
+// vor den langsamen fs-/Radio-Inits aufzurufen.
+void almemoEinkInitBlank();
 
 #endif // ALMEMO_EINK

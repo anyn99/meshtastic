@@ -84,13 +84,15 @@ void initVariant()
     pinMode(HICHG, OUTPUT);
     digitalWrite(HICHG, LOW);
 
-    // LEDs
-    pinMode(PIN_LED1, OUTPUT);
-    ledOff(PIN_LED1);
+    // LEDs — direkt über LED_RED/GREEN/BLUE statt PIN_LED1..3, da PIN_LED1 beim
+    // ALMEMO_SENSOR_SENDER bewusst nicht definiert ist (kein LED_POWER). Die drei
+    // Farbkanäle werden hier in jedem Build auf "aus" gesetzt.
+    pinMode(LED_GREEN, OUTPUT);
+    ledOff(LED_GREEN);
 
-    pinMode(PIN_LED2, OUTPUT);
-    ledOff(PIN_LED2);
+    pinMode(LED_BLUE, OUTPUT);
+    ledOff(LED_BLUE);
 
-    pinMode(PIN_LED3, OUTPUT);
-    ledOff(PIN_LED3);
+    pinMode(LED_RED, OUTPUT);
+    ledOff(LED_RED);
 }
