@@ -15,19 +15,23 @@
  *
  *   - BLAU  : kurzer Puls beim Senden
  *   - GRÜN  : dauerhaft, solange USB angesteckt ist — auch zwischen den Blinks
- *   - GELB  : kurzer Blitz (2 ms), wenn kein Sensor gefunden wurde
- *   - ROT   : kurzer Blitz (2 ms), bei sonstigem Problem (z. B. Lesefehler)
+ *   - GELB  : deutlicher Blitz mit langer Pause, wenn kein Sensor gefunden wurde
+ *   - ROT   : deutlicher Blitz mit langer Pause, bei sonstigem Problem (z. B. Lesefehler)
  *   - AUS   : nur ohne USB / schlafend
+ *
+ * Der Farb-Blitz ist lang genug, um neben dem Dauer-Grün (USB) gut sichtbar zu
+ * sein; die Pause dazwischen ist bewusst lang, damit im Batteriebetrieb (LED in
+ * der Pause aus) wenig Strom verbraucht wird. Bei USB bleibt die Pause grün.
  *
  * Status wird vom AlmemoSenderThread über setState()/pulseSend() gesetzt.
  */
 
 #ifndef ALMEMO_LED_BLINK_ON_MS
-#define ALMEMO_LED_BLINK_ON_MS 2
+#define ALMEMO_LED_BLINK_ON_MS 300
 #endif
 
 #ifndef ALMEMO_LED_BLINK_OFF_MS
-#define ALMEMO_LED_BLINK_OFF_MS 998
+#define ALMEMO_LED_BLINK_OFF_MS 3000
 #endif
 
 // Wie lange Grün nach einem Sendevorgang sichtbar gehalten wird.
