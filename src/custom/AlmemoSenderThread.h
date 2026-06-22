@@ -20,6 +20,7 @@
 #include <Adafruit_SHT31.h>
 #include <Wire.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef NRF52_SERIES
@@ -106,6 +107,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         SRC_ALMEMO      = 1,
         SRC_SHT         = 2,
         SRC_ALMEMO_MULTI = 3, // mehrere ALMEMO-Sensoren hinter Mux @0x70
+        SRC_EMULATOR    = 4,  // -DALMEMO_EMULATOR: randomisierte Testwerte statt echtem I2C
     };
 
     static constexpr uint8_t TCA_CHANNELS = 8; // TCA9548A: 8 schaltbare Kanäle
@@ -148,6 +150,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         case SRC_ALMEMO:       return "ALMEMO";
         case SRC_ALMEMO_MULTI: return "ALMEMO_MULTI";
         case SRC_SHT:          return "SHT";
+        case SRC_EMULATOR:     return "EMU";
         default:               return "NONE";
         }
     }
@@ -237,6 +240,10 @@ class AlmemoSenderThread : public concurrency::OSThread
     /** Mux @0x70 zuerst, dann ALMEMO @0x50, dann SHT @0x44. */
     bool probeSensors()
     {
+#if defined(ALMEMO_EMULATOR)
+        source = SRC_EMULATOR; // kein echtes I2C-Probing; Quelle ist immer "vorhanden"
+        return true;
+#else
         if (probeMux()) {
             source = SRC_ALMEMO_MULTI;
             return true;
@@ -252,6 +259,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             return true;
         }
         return false;
+#endif
     }
 
     /** Einen AlmemoValue an pkt anhängen, sofern noch Platz ist. */
@@ -298,6 +306,21 @@ class AlmemoSenderThread : public concurrency::OSThread
         return anyAnswered ? ReadStatus::Error : ReadStatus::Disconnected;
     }
 
+    /**
+     * Randomisierte Testwerte statt echtem Sensor (-DALMEMO_EMULATOR): Temp
+     * ~24 °C ±0,5 und Feuchte ~50 % ±5 als 2 native ALMEMO-Werte (Exponent -2,
+     * °C / %H, channel 0 = Einzelwerte). Läuft im normalen Sender-Takt.
+     */
+    static ReadStatus appendEmulatorValues(AlmemoSensorPacket &pkt)
+    {
+        int16_t temp = 2400 + (rand() % 101) - 50;
+        int16_t humi = 5000 + (rand() % 1001) - 500;
+        appendValue(pkt, 0, (char)0xF8, 'C', -2, temp);
+        appendValue(pkt, 1, '%', 'H', -2, humi);
+        LOG_DEBUG("AlmemoEmulator: temp=%d.%02d degC humi=%d.%02d %%rH", temp / 100, temp % 100, humi / 100, humi % 100);
+        return ReadStatus::Ok;
+    }
+
     /** SHT als 2 native ALMEMO-Werte (°C, %H, Exponent -2) an pkt anhängen. */
     ReadStatus appendShtValues(AlmemoSensorPacket &pkt)
     {
@@ -342,6 +365,8 @@ class AlmemoSenderThread : public concurrency::OSThread
         }
         case SRC_SHT:
             return appendShtValues(pkt);
+        case SRC_EMULATOR:
+            return appendEmulatorValues(pkt);
         default:
             return ReadStatus::Disconnected;
         }
@@ -373,6 +398,9 @@ class AlmemoSenderThread : public concurrency::OSThread
             break;
         case SRC_SHT:
             setEinkSensor(out[0], "SHT", 2); // Temperatur + Feuchte
+            break;
+        case SRC_EMULATOR:
+            setEinkSensor(out[0], "EMU", 2); // randomisierte Temp + Feuchte
             break;
         case SRC_ALMEMO_MULTI:
             // Mux-Kanal ch -> Rechteck ch (feste Position); nur die ersten 4 Kanäle.

@@ -6,11 +6,13 @@ static I2CSlaveThread *i2cSlaveThread;
 static AlmemoReceiverModule *almemoReceiverModule;
 #endif
 #endif
-#if defined(ALMEMO_EMULATOR)
+#if defined(ALMEMO_EMULATOR) && defined(ALMEMO_SENSOR_RECEIVER)
+// Receiver-Test: schreibt Random-Werte direkt in die I2C-Register (kein Mesh).
+// Der Sender-seitige Emulator steckt seit der Konsolidierung im AlmemoSenderThread.
 #include "custom/EmulatorThread.h"
 static EmulatorThread *emulatorThread;
 #endif
-#if defined(ALMEMO_SENSOR_SENDER) && !defined(ALMEMO_EMULATOR)
+#if defined(ALMEMO_SENSOR_SENDER)
 #include "custom/AlmemoLed.h"
 #include "custom/AlmemoSenderThread.h"
 AlmemoLedThread *almemoLedThread;
@@ -1050,14 +1052,10 @@ void setup()
     almemoReceiverModule = new AlmemoReceiverModule(i2cSlaveThread);
 #endif
 #endif
-#if defined(ALMEMO_EMULATOR)
-#if defined(ALMEMO_SENSOR_RECEIVER)
+#if defined(ALMEMO_EMULATOR) && defined(ALMEMO_SENSOR_RECEIVER)
     emulatorThread = new EmulatorThread(i2cSlaveThread);
-#else
-    emulatorThread = new EmulatorThread();
 #endif
-#endif
-#if defined(ALMEMO_SENSOR_SENDER) && !defined(ALMEMO_EMULATOR)
+#if defined(ALMEMO_SENSOR_SENDER)
     almemoLedThread = new AlmemoLedThread();
     almemoSenderThread = new AlmemoSenderThread();
 #endif

@@ -4,40 +4,22 @@
 #include "configuration.h"
 #include <stdlib.h>
 
-#include "AlmemoPacket.h"
-#include "Default.h"
-#if defined(ALMEMO_SENSOR_RECEIVER)
 #include "AlmemoReceiverModule.h"
-#else
-#include "MeshService.h"
-#include "NodeDB.h"
-#include "Router.h"
-#include "gps/RTC.h"
-#include <string.h>
-#endif
+#include "Default.h"
 
 /**
- * EmulatorThread
+ * EmulatorThread (Receiver-Test)
  *
- * Generates synthetic sensor readings (temperature + humidity) for testing.
+ * Schreibt synthetische Messwerte (Temperatur + Feuchte) direkt in die
+ * I2C-Slave-Register (0x40) des I2CSlaveThread, damit der ALMEMO-Master ohne
+ * realen Sender getestet werden kann.
  *
- * Broadcasts an AlmemoSensorPacket on mesh channel ALMEMO_CHANNEL_INDEX
- * (default: 1) via PRIVATE_APP portnum.
+ *   reg 0: Temperatur  — 4-Byte [0x00 0x40 MSB LSB], Festkomma *100
+ *   reg 1: Feuchte     — gleiches Format
  *
- * Receiver mode (ALMEMO_SENSOR_RECEIVER, slave != nullptr):
- *   Also writes the readings into the I2CSlaveThread register device (0x40)
- *   so the ALMEMO master can read them via I2C.
- *
- *   reg 0: temperature  — 4-byte format [0x00 0x40 MSB LSB], fixed-point *100
- *   reg 1: humidity     — same format
- *
- * Interval: hijacks moduleConfig.detection_sensor.state_broadcast_secs so the
- * rate is editable from the phone app. 0 → EMULATOR_DEFAULT_INTERVAL_MS.
+ * Der Sender-seitige Emulator (Mesh) steckt seit der Konsolidierung im
+ * AlmemoSenderThread (aktiv via -DALMEMO_EMULATOR auf der Sender-Variante).
  */
-
-#ifndef ALMEMO_CHANNEL_INDEX
-#define ALMEMO_CHANNEL_INDEX 1
-#endif
 
 #ifndef EMULATOR_DEFAULT_INTERVAL_MS
 #define EMULATOR_DEFAULT_INTERVAL_MS 1500
@@ -45,23 +27,17 @@
 
 class EmulatorThread : public concurrency::OSThread
 {
-#if defined(ALMEMO_SENSOR_RECEIVER)
     I2CSlaveThread *slave;
-#endif
 
-    // Send cadence in ms, runtime-configurable via moduleConfig.telemetry.environment_update_interval (sec).
+    // Sende-Takt in ms, zur Laufzeit über moduleConfig.telemetry.environment_update_interval (sek) konfigurierbar.
     static uint32_t intervalMs()
     {
         return Default::getConfiguredOrDefaultMsScaled(moduleConfig.telemetry.environment_update_interval,
-        		EMULATOR_DEFAULT_INTERVAL_MS, nodeStatus->getNumOnline());
+                                                       EMULATOR_DEFAULT_INTERVAL_MS, nodeStatus->getNumOnline());
     }
 
   public:
-#if defined(ALMEMO_SENSOR_RECEIVER)
     explicit EmulatorThread(I2CSlaveThread *s = nullptr) : OSThread("Emulator"), slave(s) {}
-#else
-    EmulatorThread() : OSThread("Emulator") {}
-#endif
 
   protected:
     int32_t runOnce() override
@@ -69,58 +45,22 @@ class EmulatorThread : public concurrency::OSThread
         int16_t temp = 2400 + (rand() % 101) - 50;
         int16_t humi = 5000 + (rand() % 1001) - 500;
 
-#if defined(ALMEMO_SENSOR_RECEIVER)
-        /* --- I2C slave registers ----------------------------------------- */
         if (slave) {
             uint8_t datatemp[I2CSlaveThread::REG_MAX] = {
-                0x00,
-                0x40,
-                (uint8_t)((uint16_t)temp >> 8),
-                (uint8_t)((uint16_t)temp & 0xFF),
+                0x00, 0x40, (uint8_t)((uint16_t)temp >> 8), (uint8_t)((uint16_t)temp & 0xFF),
             };
             slave->writeReg(0, datatemp);
 
             uint8_t datahumi[I2CSlaveThread::REG_MAX] = {
-                0x00,
-                0x40,
-                (uint8_t)((uint16_t)humi >> 8),
-                (uint8_t)((uint16_t)humi & 0xFF),
+                0x00, 0x40, (uint8_t)((uint16_t)humi >> 8), (uint8_t)((uint16_t)humi & 0xFF),
             };
             slave->writeReg(1, datahumi);
         }
-#else
-        /* --- Mesh packet (sender only) ----------------------------------- */
-        /* temp/humi sind bereits int16 ×100 → roh übernehmen, Exponent -2,
-         * Einheiten °C / %H (native ALMEMO-Darstellung). */
-        AlmemoSensorPacket pkt;
-        pkt.version   = ALMEMO_PACKET_VERSION;
-        pkt.node_id   = nodeDB->getNodeNum();
-        pkt.timestamp = getTime();
-        pkt.count     = 0;
-        pkt.values[pkt.count++] = AlmemoValue{ 0, { (char)0xF8, 'C' }, -2, temp };
-        pkt.values[pkt.count++] = AlmemoValue{ 1, { '%', 'H' },        -2, humi };
 
-        static_assert(sizeof(AlmemoSensorPacket) <= sizeof(meshtastic_MeshPacket::decoded.payload.bytes),
-                      "AlmemoSensorPacket too large for MeshPacket payload");
-
-        size_t wireSize = almemoPacketSize(pkt.count);
-
-        meshtastic_MeshPacket *p = router->allocForSending();
-        p->to                   = NODENUM_BROADCAST;
-        p->channel              = ALMEMO_CHANNEL_INDEX;
-        p->decoded.portnum      = meshtastic_PortNum_PRIVATE_APP;
-        p->priority             = meshtastic_MeshPacket_Priority_DEFAULT;
-        memcpy(p->decoded.payload.bytes, &pkt, wireSize);
-        p->decoded.payload.size = wireSize;
-
-        service->sendToMesh(p, RX_SRC_LOCAL);
-#endif
-
-
-        uint32_t cycleMs = intervalMs();
-        uint32_t elapsed = millis();
-        uint32_t nextMs = (cycleMs > 0) ? cycleMs : EMULATOR_DEFAULT_INTERVAL_MS;
-        LOG_DEBUG("AlmemoEmulator:  temp: %d.%02d degC  humi: %d.%02d %%rH  next: %d ms",
+        uint32_t nextMs = intervalMs();
+        if (nextMs == 0)
+            nextMs = EMULATOR_DEFAULT_INTERVAL_MS;
+        LOG_DEBUG("AlmemoEmulator(rx):  temp: %d.%02d degC  humi: %d.%02d %%rH  next: %d ms",
                   temp / 100, temp % 100, humi / 100, humi % 100, nextMs);
 
         return nextMs;
