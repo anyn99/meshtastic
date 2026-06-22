@@ -109,6 +109,20 @@ static void buildEmptyInfo(uint8_t *buf)
     buf[0] = 0xFF;
 }
 
+/**
+ * True iff the packet value carries a temperature, i.e. its unit is "°C".
+ * The degree sign arrives as 0xF8 from this project's SHT path; real ALMEMO
+ * sensors may store a different degree byte, so the common 0xDF/0xB0 encodings
+ * are accepted too. Adjust here if a sensor reports °C with another leading byte.
+ */
+static inline bool isTemperatureUnit(const char unit[2])
+{
+    if (unit[1] != 'C')
+        return false;
+    uint8_t deg = (uint8_t)unit[0];
+    return deg == 0xF8 || deg == 0xDF || deg == 0xB0;
+}
+
 /* -------------------------------------------------------------------------
  * GPIOTE_IRQHandler — direct strong definition, overrides startup.S weak alias.
  *
@@ -246,15 +260,9 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
 /* -------------------------------------------------------------------------
  * Slot helpers
  *
- * onValue() (Router task) and runOnce() (I2CSlave OSThread task) both touch
- * nodes[]. Both are FreeRTOS tasks running at low frequency (one packet per
- * sender interval, runOnce every ~1 s); a torn read of a 32-bit field is
- * atomic on Cortex-M4 and the worst observable race — runOnce missing or
- * mis-expiring once — is self-correcting on the next tick. No mutex needed.
- *
- * The unregister/register calls inside muteI2CFor/unmuteI2C modify the
- * i2c_bb_slave callback table read from the GPIOTE ISR; those are wrapped in
- * NVIC_DisableIRQ(GPIOTE_IRQn) for ISR-vs-task atomicity.
+ * onValue() runs on the Router task and is the only writer of nodes[]. The
+ * table is first-come-first-served and never cleared at runtime, so there is
+ * no task-vs-task race to guard against.
  * ---------------------------------------------------------------------- */
 
 uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id, uint8_t sub)
@@ -263,20 +271,26 @@ uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id, uint8_t sub)
         if (nodes[i].in_use && nodes[i].node_id == node_id && nodes[i].sub == sub) return i;
     for (uint8_t i = 0; i < MAX_NODES; i++)
         if (!nodes[i].in_use) return i;
-    /* All occupied: evict the LRU node (oldest last_seen_ms). */
-    uint8_t oldest = 0;
-    for (uint8_t i = 1; i < MAX_NODES; i++)
-        if (nodes[i].last_seen_ms < nodes[oldest].last_seen_ms) oldest = i;
-    expireSlot(oldest);
-    return oldest;
+    /* All 4 channels already taken — ignore this new stream. */
+    return 0xFF;
 }
 
 void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent)
 {
-    /* Kommentar = "NNNN.S": last 4 hex chars of node_id (short name) + sub index,
-     * so several values from the same sender stay distinguishable. */
+    /* Kommentar = node short name (last 4 hex of node_id) + decoded sub index.
+     * sub packs (channel << 2) | valueIndex (see AlmemoValue::slot):
+     *   channel 0  → loose single values (e.g. SHT)        → "NNNN.S<v>"
+     *   channel >0 → ALMEMO sensor, numbered from 1 in the   → "NNNN.C<c>S<v>"
+     *                packet but shown 0-based here (channel-1).
+     * Keeps several values from the same sender distinguishable. */
+    const unsigned node16  = (unsigned)(node_id & 0xFFFF);
+    const uint8_t  channel = sub >> 2;
+    const uint8_t  valIdx  = sub & 0x03;
     char comment[11];
-    snprintf(comment, sizeof(comment), "%04X.%u", (unsigned)(node_id & 0xFFFF), sub);
+    if (channel == 0)
+        snprintf(comment, sizeof(comment), "%04X.S%u", node16, valIdx);
+    else
+        snprintf(comment, sizeof(comment), "%04X.C%uS%u", node16, channel - 1, valIdx);
 
     uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
     buildSensorInfo(buf, unit, exponent, comment);
@@ -301,13 +315,15 @@ void I2CSlaveThread::writeRawForSlot(uint8_t slot, int16_t raw)
     writeReg(slot, data);
 }
 
-void I2CSlaveThread::expireSlot(uint8_t slot)
-{
-    LOG_INFO("AlmemoRx: slot %u expired (node=%08X sub=%u)", slot, (unsigned)nodes[slot].node_id, nodes[slot].sub);
-    nodes[slot] = NodeEntry{};
-    clearSlot(slot);
-    muteI2CFor(ALMEMO_RX_MUTE_MS);
-}
+/* -------------------------------------------------------------------------
+ * I2C mute — brief NACK window to make the master rescan the EEPROM.
+ *
+ * unregister()/register() modify the i2c_bb_slave callback table that the
+ * GPIOTE ISR reads, so both are wrapped in NVIC_DisableIRQ(GPIOTE_IRQn) for
+ * ISR-vs-task atomicity. Both are called ONLY from runOnce() (I2CSlave task),
+ * so muteUntilMs and the registration state are single-task — no task-vs-task
+ * race. A pending rescan (rescanRequested, set by onValue) drives muteI2CFor.
+ * ---------------------------------------------------------------------- */
 
 void I2CSlaveThread::muteI2CFor(uint32_t ms)
 {
@@ -342,57 +358,63 @@ void I2CSlaveThread::unmuteI2C()
 
 void I2CSlaveThread::onValue(uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent, int16_t raw)
 {
-    uint8_t slot = findOrAllocSlot(node_id, sub);
-
-    uint32_t now = millis();
-    NodeEntry &n = nodes[slot];
-    if (!n.in_use || n.node_id != node_id || n.sub != sub) {
-        /* New stream (fresh slot or LRU eviction of a different one). */
-        n.in_use       = true;
-        n.node_id      = node_id;
-        n.sub          = sub;
-        n.prev_seen_ms = 0;
-        n.last_seen_ms = now;
-        initSlotForNode(slot, node_id, sub, unit, exponent);
-        /* Value count just increased — force the master to rescan EEPROM by
-         * going silent on I2C for ALMEMO_RX_MUTE_MS. Same mechanism we use on
-         * expiration; expireSlot() already does this for the eviction case. */
-        muteI2CFor(ALMEMO_RX_MUTE_MS);
-        LOG_INFO("AlmemoRx: slot %u allocated for node=%08X sub=%u", slot, (unsigned)node_id, sub);
-    } else {
-        n.prev_seen_ms = n.last_seen_ms;
-        n.last_seen_ms = now;
+    /* Only temperatures go into the emulated EEPROM; everything else (humidity,
+     * pressure, …) is received but dropped here. */
+    if (!isTemperatureUnit(unit)) {
+        LOG_DEBUG("AlmemoRx: skip non-temp value node=%08X sub=%u unit=%02X%02X", (unsigned)node_id, sub,
+                  (uint8_t)unit[0], (uint8_t)unit[1]);
+        return;
     }
 
+    uint8_t slot = findOrAllocSlot(node_id, sub);
+    if (slot == 0xFF)
+        return; /* all 4 channels taken — ignore this new stream */
+
+    NodeEntry &n = nodes[slot];
+    if (!n.in_use) {
+        /* First value for this (node_id, sub): claim the slot, fill its EEPROM
+         * info block and ask the I2CSlave task to mute the bus so the master
+         * rescans and discovers the new sensor. We only set the flag here (single
+         * atomic write); runOnce() owns the actual mute — and only acts on it on
+         * its next tick, i.e. after this onValue (incl. writeRawForSlot) has run,
+         * so the slot is always complete before the bus goes quiet. */
+        n.in_use  = true;
+        n.node_id = node_id;
+        n.sub     = sub;
+        initSlotForNode(slot, node_id, sub, unit, exponent);
+        rescanRequested = true;
+        LOG_INFO("AlmemoRx: slot %u allocated for node=%08X sub=%u (rescan requested)", slot, (unsigned)node_id, sub);
+    }
+
+    /* Update (or first-write) the live value; the slot keeps it until the next
+     * value arrives — no expiration. */
     writeRawForSlot(slot, raw);
 }
 
 /* -------------------------------------------------------------------------
- * OSThread runOnce — periodic expiration scan + mute end + stats log
+ * OSThread runOnce — mute state machine + stats log + stuck-state debug
+ *
+ * No slot expiration: slots are filled first-come and keep their last value
+ * forever. Only this (I2CSlave) task touches the mute, so no cross-task race.
  * ---------------------------------------------------------------------- */
 
 int32_t I2CSlaveThread::runOnce()
 {
-    /* End the mute window? Re-register addresses so the master sees us again. */
-    if (muteUntilMs && (int32_t)(millis() - muteUntilMs) >= 0)
-        unmuteI2C();
-
-    /* Expiration scan. */
-    {
-        uint32_t now = millis();
-        for (uint8_t i = 0; i < MAX_NODES; i++) {
-            NodeEntry &n = nodes[i];
-            if (!n.in_use) continue;
-            uint32_t timeout;
-            if (n.prev_seen_ms == 0) {
-                timeout = ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS;
-            } else {
-                uint32_t interval = n.last_seen_ms - n.prev_seen_ms;
-                timeout = interval + interval / 5 + 3000; /* +20% +3s margin (mesh jitter / retries) */
-            }
-            if ((int32_t)(now - n.last_seen_ms) > (int32_t)timeout)
-                expireSlot(i);
-        }
+    /* Mute state machine — only this (I2CSlave) task touches muteUntilMs and the
+     * i2c_bb_slave registration, so there is no cross-task race. onValue() (Router
+     * task) merely sets rescanRequested. While muted we just wait for the window
+     * to end; otherwise a pending rescan request starts a fresh mute. */
+    if (muteUntilMs) {
+        if ((int32_t)(millis() - muteUntilMs) >= 0)
+            unmuteI2C(); // window over → audible again
+    } else if (rescanRequested) {
+        rescanRequested = false;
+        /* Only mute within the master's startup window; later the master won't
+         * re-enumerate anyway, so a mute would just disrupt the bus for nothing. */
+        if (millis() < ALMEMO_RX_MUTE_WINDOW_MS)
+            muteI2CFor(ALMEMO_RX_MUTE_MS); // new sensor pending → start a rescan mute
+        else
+            LOG_DEBUG("AlmemoRx: rescan skipped, past %lums startup window", (unsigned long)ALMEMO_RX_MUTE_WINDOW_MS);
     }
 
     /* Stats log, throttled to ~5s independently of the runOnce cadence.

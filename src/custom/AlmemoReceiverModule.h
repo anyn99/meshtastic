@@ -11,16 +11,19 @@
 #define ALMEMO_CHANNEL_INDEX 1
 #endif
 
-/* Fallback timeout if a node has only sent one packet so far (no interval
- * estimate available yet). After this much silence the slot is cleared. */
-#ifndef ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS
-#define ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS 60000u
-#endif
-
-/* Duration to NACK all I2C transactions after a slot is cleared, so the
- * master rescans and updates its sensor count. */
+/* Duration to NACK all I2C transactions after a new sensor slot is allocated,
+ * so the master notices the device "disappear/reappear" and rescans the EEPROM
+ * to pick up the freshly populated sensor channel. */
 #ifndef ALMEMO_RX_MUTE_MS
 #define ALMEMO_RX_MUTE_MS 2000u
+#endif
+
+/* Only mute within this window after boot. The ALMEMO master enumerates its
+ * sensor list once, during its own startup (~20-30 s); after that it ignores
+ * EEPROM changes no matter what, so muting later only disrupts the bus for
+ * nothing. Assumes receiver and master power up together. */
+#ifndef ALMEMO_RX_MUTE_WINDOW_MS
+#define ALMEMO_RX_MUTE_WINDOW_MS 30000u
 #endif
 
 /**
@@ -41,15 +44,28 @@
  * each landing in its own slot. The slot's Kommentar shows "NNNN.S"
  * (node short name + sub); unit and exponent come straight from the packet.
  *
- * onValue() is the entry point from the mesh (once per AlmemoValue): allocates
- * a slot for unseen (node_id, sub) pairs, updates timestamps and the live
- * value register for known ones.
+ * Slot assignment is first-come-first-served: the first MAX_NODES distinct
+ * (node_id, sub) streams each claim one of the 4 EEPROM sensor channels and
+ * keep it for good. Once all 4 are taken, further new streams are ignored.
  *
- * runOnce() expires slots whose sender went silent longer than its measured
- * inter-arrival interval × 1.05 (or ALMEMO_RX_FIRST_PACKET_TIMEOUT_MS if only
- * one packet has been received). On expiration the slot is reset to the empty
- * template and the I2C slave goes silent for ALMEMO_RX_MUTE_MS so the master
- * rescans.
+ * Only temperature values (unit "°C") are adopted into the emulated EEPROM;
+ * other values (humidity, pressure, …) are received but dropped. onValue() is
+ * the entry point from the mesh (once per AlmemoValue): for a temperature it
+ * claims a free slot for an unseen (node_id, sub) pair (populating the EEPROM
+ * info block) and updates the live value register. There is deliberately NO
+ * expiration and NO interval tracking — a slot that stops receiving simply
+ * keeps showing its last value.
+ *
+ * The I2C bus is muted only right after a NEW slot is allocated AND only within
+ * the first ALMEMO_RX_MUTE_WINDOW_MS after boot: we NACK for ALMEMO_RX_MUTE_MS so
+ * the master rescans the EEPROM and discovers the freshly populated channel.
+ * After that window the master no longer re-enumerates, so we never mute (it
+ * would only disrupt the bus). Plain value updates never mute.
+ *
+ * Ownership: onValue() (Router task) only sets rescanRequested. ALL mute state
+ * (muteUntilMs + the i2c_bb_slave registration) is owned exclusively by runOnce()
+ * on the I2CSlave task, so the two tasks never race on the mute — a previous
+ * design let runOnce's unmute cancel a mute that onValue had just (re)started.
  */
 class I2CSlaveThread : public concurrency::OSThread
 {
@@ -69,9 +85,11 @@ class I2CSlaveThread : public concurrency::OSThread
     I2CSlaveThread();
 
     /**
-     * Ingest one value from the mesh. Allocates a slot for new (node_id, sub)
-     * pairs (populating the EEPROM info block from unit + exponent), refreshes
-     * timestamps and updates the live value register for known ones.
+     * Ingest one value from the mesh. Non-temperature values (unit != "°C") are
+     * dropped. For a temperature it claims a free slot for a new (node_id, sub)
+     * pair (populating the EEPROM info block from unit + exponent) and updates
+     * the live value register. Known pairs just update their value. New pairs
+     * are ignored once all MAX_NODES slots are taken.
      * Called from the Router task, once per AlmemoValue in a packet.
      *
      * @param raw  raw int16 reading; physical = raw * 10^exponent.
@@ -96,22 +114,22 @@ class I2CSlaveThread : public concurrency::OSThread
   private:
     struct NodeEntry {
         uint32_t node_id;
-        uint8_t  sub;          /* sender ALMEMO slot index — part of the stream key */
-        uint32_t last_seen_ms;
-        uint32_t prev_seen_ms; /* 0 = only one packet seen so far — interval unknown */
+        uint8_t  sub; /* sender ALMEMO slot index — part of the stream key */
         bool     in_use;
     };
 
     NodeEntry nodes[MAX_NODES] = {};
-    uint32_t  muteUntilMs = 0;       /* 0 = not muted; otherwise wall-time deadline */
+    uint32_t  muteUntilMs = 0;             /* 0 = not muted; otherwise wall-time deadline (I2CSlave task only) */
+    volatile bool rescanRequested = false; /* set by onValue (Router task) → runOnce starts the mute */
 
+    /* Returns the slot index for (node_id, sub), claiming a free one if unseen.
+     * Returns 0xFF when all slots are taken and the pair is new. */
     uint8_t findOrAllocSlot(uint32_t node_id, uint8_t sub);
     void    initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent);
     void    clearSlot(uint8_t slot);
     void    writeRawForSlot(uint8_t slot, int16_t raw);
-    void    expireSlot(uint8_t slot);
-    void muteI2CFor(uint32_t ms);
-    void unmuteI2C();
+    void    muteI2CFor(uint32_t ms);
+    void    unmuteI2C();
 
     /* Internal state (accessed from ISR — keep volatile) */
     static volatile uint8_t s_eeprom_ptr[2]; // current address pointer per EEPROM
