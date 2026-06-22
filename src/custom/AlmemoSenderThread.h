@@ -270,7 +270,9 @@ class AlmemoSenderThread : public concurrency::OSThread
     /**
      * Alle vorhandenen Slots eines ALMEMO-Geräts roh auslesen und als
      * AlmemoValue (Einheit + Exponent + Rohwert) an pkt anhängen.
-     * @param slotIdBase Offset auf die Slot-Identität (Mux später: kanal<<2).
+     * @param slotIdBase channel<<2: oberer Teil der slot-Identität. Der ALMEMO-
+     *        Sensor-Channel startet bei 1 (0 ist Einzelwerten wie SHT vorbehalten),
+     *        valueIndex 0..3 (= Slot s im Gerät) wird hier addiert.
      */
     static ReadStatus appendAlmemoValues(AlmemoI2CSensor &dev, AlmemoSensorPacket &pkt, uint8_t slotIdBase)
     {
@@ -318,17 +320,25 @@ class AlmemoSenderThread : public concurrency::OSThread
         pkt.count = 0;
         switch (source) {
         case SRC_ALMEMO:
-            return appendAlmemoValues(almemo, pkt, 0);
+            /* Einzelner ALMEMO-Sensor (kein Mux) → channel 1. */
+            return appendAlmemoValues(almemo, pkt, 1u << 2);
         case SRC_ALMEMO_MULTI: {
-            /* Interim: nur das erste gefundene Mux-Gerät wird gesendet.
-             * Vor dem Zugriff den passenden Kanal durchschalten. */
+            /* Alle vorhandenen Mux-Kanäle senden: vor jedem Gerät den passenden
+             * Kanal durchschalten und dessen Werte anhängen. Mux-Kanal ch →
+             * Paket-channel ch+1 (channel 0 = Einzelwerte/SHT). */
+            bool anyOk = false, anyAnswered = false;
             for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++) {
                 if (!muxPresent[ch])
                     continue;
                 tcaSelect(ch);
-                return appendAlmemoValues(almemoMux[ch], pkt, 0);
+                ReadStatus rs = appendAlmemoValues(almemoMux[ch], pkt, (uint8_t)((ch + 1) << 2));
+                if (rs == ReadStatus::Ok)
+                    anyOk = anyAnswered = true;
+                else if (rs == ReadStatus::Error)
+                    anyAnswered = true;
+                /* Disconnected: dieser Kanal liefert (gerade) nichts → überspringen */
             }
-            return ReadStatus::Disconnected;
+            return anyOk ? ReadStatus::Ok : (anyAnswered ? ReadStatus::Error : ReadStatus::Disconnected);
         }
         case SRC_SHT:
             return appendShtValues(pkt);
@@ -485,6 +495,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         p->channel              = ALMEMO_CHANNEL_INDEX;
         p->decoded.portnum      = meshtastic_PortNum_PRIVATE_APP;
         p->priority             = meshtastic_MeshPacket_Priority_DEFAULT;
+        p->hop_limit            = 0; // nur direkte Nachbarn, kein Weiterleiten im Mesh
         memcpy(p->decoded.payload.bytes, &pkt, wireSize);
         p->decoded.payload.size = wireSize;
 
@@ -495,7 +506,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             almemoLedThread->pulseSend();                    // grüner Sende-Puls
         }
 
-        LOG_DEBUG("AlmemoSender [%s] %u value(s) sent", sourceName(source), pkt.count);
+        LOG_DEBUG("AlmemoSender [%s] %u value(s), %u bytes sent", sourceName(source), pkt.count, (unsigned)wireSize);
 
 #if defined(ALMEMO_EINK)
         // E-Paper mit Intervall + Sendezähler + den 4 Sensor-Infos (Name/Wertanzahl) versorgen.

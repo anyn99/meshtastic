@@ -23,7 +23,11 @@
  */
 
 #ifndef ALMEMO_MAX_VALUES
-#define ALMEMO_MAX_VALUES 8 /* single ALMEMO device has <=4 slots; headroom for mux later */
+/* One ALMEMO device has <=4 value slots. With the TCA9548 mux (up to 8 channels,
+ * one sensor each) the worst case is 8*4 = 32; 16 covers a fully-populated
+ * 4-channel mux. Each entry is 6 bytes on the wire, so 16 -> 106-byte packet,
+ * well within the mesh payload limit. Bump toward 32 for denser mux setups. */
+#define ALMEMO_MAX_VALUES 16
 #endif
 
 /* Bump whenever the wire layout changes; receiver rejects mismatched senders. */
@@ -31,8 +35,11 @@
 
 /** One typed measurement from a single ALMEMO slot. */
 struct __attribute__((packed)) AlmemoValue {
-    uint8_t slot;     /* identity within the sender: ALMEMO slot 0..3
-                       * (mux later encodes the channel, e.g. channel<<2 | slot) */
+    uint8_t slot;     /* packed identity within the sender, (channel << 2) | valueIndex:
+                       *   bits 0-1 : valueIndex — which measured value of the sensor (0..3)
+                       *   bits 2-7 : channel    — which sensor. channel 0 means the node
+                       *              sends loose single values (e.g. an SHT, no ALMEMO
+                       *              sensor attached); ALMEMO sensors are numbered from 1. */
     char    unit[2];  /* ALMEMO unit bytes (NOT null-terminated) */
     int8_t  exponent; /* signed power-of-ten exponent */
     int16_t raw;      /* raw sensor reading; physical = raw * 10^exponent */
