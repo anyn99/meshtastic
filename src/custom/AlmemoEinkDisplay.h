@@ -75,7 +75,9 @@ class AlmemoEinkDisplay
             display.init(0, true, 10, false);
             display.setRotation(3); // 180° (Modul-Einbaulage, Bild stand sonst auf dem Kopf)
         }
-        render(false); // leerer weißer Startbildschirm (ohne Inhalt)
+        // render(false); // leerer weißer Startbildschirm -> bewusst aus: Display soll beim ersten
+        //                 // publish() nicht weiß aufblitzen, sondern direkt vom alten Bild auf die
+        //                 // Daten übergehen.
     }
 
     // Daten übernehmen und das Display sofort neu zeichnen.

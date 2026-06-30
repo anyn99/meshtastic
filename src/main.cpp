@@ -346,12 +346,11 @@ void setup()
     earlyInitVariant();
 
 #if defined(ALMEMO_EINK)
-    // E-Paper so früh wie möglich mit leerem Bild hochfahren – noch VOR consoleInit(), dessen
-    // SerialConsole-Ctor auf nRF52 bis zu 5 s auf eine USB-Serial-Verbindung wartet
-    // (while (!Port) ...). Liefe der E-Paper-Init danach, erschiene der leere Screen erst nach
-    // diesem Wait. initSPI() (legt nur den spiLock an) ziehen wir dafür hier mit hoch.
-    initSPI();
-    almemoEinkInitBlank();
+    // E-Paper NICHT leer hochfahren: das Display behält sein bistabiles Bild und wird erst
+    // beim ersten almemoEinkPublish() (nach dem ersten Senden) initialisiert und neu gezeichnet.
+    // Früher wurde hier vorab ein leerer Startbildschirm gezeichnet – bewusst auskommentiert.
+    // initSPI();
+    // almemoEinkInitBlank();
 #endif
 
 #if defined(PIN_POWER_EN)
@@ -486,10 +485,7 @@ void setup()
     LOG_INFO("Wait for peripherals to stabilize");
     delay(PERIPHERAL_WARMUP_MS);
 #endif
-    // Beim ALMEMO_EINK-Build wird der spiLock bereits oben (vor consoleInit) erzeugt.
-#if !defined(ALMEMO_EINK)
     initSPI();
-#endif
 
     OSThread::setup();
 
