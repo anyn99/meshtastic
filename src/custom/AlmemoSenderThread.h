@@ -101,6 +101,10 @@ static uint32_t almemoNextSendCount()
 #define ALMEMO_TCA_ADDR 0x70 // I2C-Multiplexer (TCA9548A)
 #endif
 
+#ifndef D7_READY_DELAY_MS
+#define D7_READY_DELAY_MS 1000 // Wartezeit nach I2C-Erkennung, bis der D7 über UART bereit ist
+#endif
+
 class AlmemoSenderThread : public concurrency::OSThread
 {
     enum SensorSource : uint8_t {
@@ -252,9 +256,20 @@ class AlmemoSenderThread : public concurrency::OSThread
          * laufen die Messwerte über UART. Entweder ein D7 wird erkannt – oder
          * eben nicht. */
         if (AlmemoD7Sensor::probe(Wire)) {
-            /* Erkannt → UART öffnen und einmalig die Setup-Sequenz fahren. */
+            /* Nach der I2C-Erkennung braucht der Sensor einen Moment, bevor er
+             * über UART antwortet (in der ersten Sekunde noch nicht bereit). */
+            delay(D7_READY_DELAY_MS);
+
+            /* UART öffnen und einmalig die Setup-Sequenz fahren. */
             Serial1.begin(AlmemoD7Sensor::UART_BAUD);
             d7.beginUart(Serial1);
+
+            /* Einmalige Erkundung direkt nach der Erkennung: alle Seiten/Formate
+             * und Textfelder ins Log dumpen. BLOCKIEREND (mehrere Sekunden) — nur
+             * für die Protokoll-Analyse gedacht, bei Bedarf Bereich eingrenzen. */
+            d7.dumpTextFields();
+            d7.dumpPages();
+
             source = SRC_ALMEMO_D7;
             LOG_INFO("AlmemoSender: ALMEMO D7 ready");
             return true;
