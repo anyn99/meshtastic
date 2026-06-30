@@ -4,6 +4,7 @@
 #include "configuration.h"
 
 #include "Almemo_I2C-Sensoren.h"
+#include "AlmemoD7Sensor.h"
 #include "AlmemoLed.h"
 #include "AlmemoPacket.h"
 #if defined(ALMEMO_EINK)
@@ -108,12 +109,14 @@ class AlmemoSenderThread : public concurrency::OSThread
         SRC_SHT         = 2,
         SRC_ALMEMO_MULTI = 3, // mehrere ALMEMO-Sensoren hinter Mux @0x70
         SRC_EMULATOR    = 4,  // -DALMEMO_EMULATOR: randomisierte Testwerte statt echtem I2C
+        SRC_ALMEMO_D7   = 5,  // -DALMEMO_SENSOR_D7: I2C-Erkennung (0x7B), Werte über UART
     };
 
     static constexpr uint8_t TCA_CHANNELS = 8; // TCA9548A: 8 schaltbare Kanäle
 
     AlmemoI2CSensor almemo;
     Adafruit_SHT31  sht;
+    AlmemoD7Sensor  d7; // SRC_ALMEMO_D7: I2C-Erkennung + UART-Messwerte
 
     /* SRC_ALMEMO_MULTI: ein ALMEMO-Treiber pro Mux-Kanal, der einen Sensor trägt. */
     AlmemoI2CSensor almemoMux[TCA_CHANNELS];
@@ -151,6 +154,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         case SRC_ALMEMO_MULTI: return "ALMEMO_MULTI";
         case SRC_SHT:          return "SHT";
         case SRC_EMULATOR:     return "EMU";
+        case SRC_ALMEMO_D7:    return "ALMEMO_D7";
         default:               return "NONE";
         }
     }
@@ -243,6 +247,19 @@ class AlmemoSenderThread : public concurrency::OSThread
 #if defined(ALMEMO_EMULATOR)
         source = SRC_EMULATOR; // kein echtes I2C-Probing; Quelle ist immer "vorhanden"
         return true;
+#elif defined(ALMEMO_SENSOR_D7)
+        /* D7: Erkennung allein über das Typ-Byte 0x7B (I2C-Handshake). Danach
+         * laufen die Messwerte über UART. Entweder ein D7 wird erkannt – oder
+         * eben nicht. */
+        if (AlmemoD7Sensor::probe(Wire)) {
+            /* Erkannt → UART öffnen und einmalig die Setup-Sequenz fahren. */
+            Serial1.begin(AlmemoD7Sensor::UART_BAUD);
+            d7.beginUart(Serial1);
+            source = SRC_ALMEMO_D7;
+            LOG_INFO("AlmemoSender: ALMEMO D7 ready");
+            return true;
+        }
+        return false;
 #else
         if (probeMux()) {
             source = SRC_ALMEMO_MULTI;
@@ -321,6 +338,17 @@ class AlmemoSenderThread : public concurrency::OSThread
         return ReadStatus::Ok;
     }
 
+    /** D7-Messwert über UART lesen und als nativen ALMEMO-Wert (°C, Exp -2) anhängen. */
+    ReadStatus appendD7Values(AlmemoSensorPacket &pkt)
+    {
+        float t;
+        /* Keine Antwort innerhalb des Timeouts → Sensor abgesteckt → neu proben. */
+        if (!d7.readValue(t))
+            return ReadStatus::Disconnected;
+        appendValue(pkt, 0, (char)0xF8, 'C', -2, (int16_t)lroundf(t * 100.0f));
+        return ReadStatus::Ok;
+    }
+
     /** SHT als 2 native ALMEMO-Werte (°C, %H, Exponent -2) an pkt anhängen. */
     ReadStatus appendShtValues(AlmemoSensorPacket &pkt)
     {
@@ -367,6 +395,8 @@ class AlmemoSenderThread : public concurrency::OSThread
             return appendShtValues(pkt);
         case SRC_EMULATOR:
             return appendEmulatorValues(pkt);
+        case SRC_ALMEMO_D7:
+            return appendD7Values(pkt);
         default:
             return ReadStatus::Disconnected;
         }
