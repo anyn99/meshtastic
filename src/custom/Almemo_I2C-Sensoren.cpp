@@ -51,7 +51,13 @@ void AlmemoI2CSensor::parseSlot(uint8_t i, const uint8_t *block)
 {
     SlotInfo &s = slots[i];
     s.type     = block[0];
-    s.present  = (s.type != TYPE_NONE);
+    /* Nur bekannte ALMEMO-Typen gelten als belegter Slot. Alles andere (z. B. die
+     * D7-Kennung 0x7B oder Busmüll) ist KEIN Sensor → present = false. */
+    s.present  = (s.type == TYPE_DIGITAL || s.type == TYPE_ANALOG);
+
+    /* Weder belegter Slot noch „leer" (0xFF) → unbekannter Typ, kurz melden. */
+    if (!s.present && s.type != TYPE_NONE)
+        LOG_DEBUG("AlmemoI2C: Unknown Sensor Type 0x%02X", s.type);
 
     /* Exponent aus oberem Nibble (digital):
      *   Bit3 = Vorzeichen (1 → negativ), Bit2-0 = Magnitude 0..4. */
@@ -96,7 +102,9 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
     }
 
     LOG_INFO("AlmemoI2C: name='%s' ver='%s' present=%u", name, version, numPresent());
-    return true;
+    /* 0x50 ackt zwar, aber ohne einen einzigen bekannten Sensor-Typ ist das kein
+     * ALMEMO-EEPROM-Gerät (z. B. ein D7 oder Fremdgerät) → als „nicht da" melden. */
+    return numPresent() > 0;
 }
 
 AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readRaw(uint8_t slot, int16_t &raw)
