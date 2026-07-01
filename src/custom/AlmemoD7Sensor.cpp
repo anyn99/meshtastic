@@ -118,14 +118,21 @@ void AlmemoD7Sensor::parseConfig()
     if (!uart)
         return;
 
-    char       p63[48], p65[256], p64[384];
-    const bool ok63 = cmdReadPage(63, p63, sizeof(p63)); // aktive Messstellen
-    const bool ok65 = cmdReadPage(65, p65, sizeof(p65)); // Messstelle→Bereich
-    const bool ok64 = cmdReadPage(64, p64, sizeof(p64)); // Bereich→Einheit/Kommastellen
+    /* P64 listet ALLE Bereichsdefinitionen (Sensor + Funktionskanäle) → kann groß
+     * werden; großzügig dimensionieren, sonst fällt hinten ein referenzierter
+     * Bereich raus. tr* meldet stilles Abschneiden (Frame > Puffer). */
+    char       p63[48], p65[384], p64[1024];
+    bool       tr63 = false, tr65 = false, tr64 = false;
+    const bool ok63 = cmdReadPage(63, p63, sizeof(p63), 200, &tr63); // aktive Messstellen
+    const bool ok65 = cmdReadPage(65, p65, sizeof(p65), 200, &tr65); // Messstelle→Bereich
+    const bool ok64 = cmdReadPage(64, p64, sizeof(p64), 200, &tr64); // Bereich→Einheit/Kommastellen
     if (!ok63 || !ok65 || !ok64) {
         LOG_ERROR("AlmemoD7: config read failed (P63=%d P65=%d P64=%d) → config aborted", ok63, ok65, ok64);
         return;
     }
+    if (tr63 || tr65 || tr64)
+        LOG_WARN("AlmemoD7: config page truncated (P63=%d P65=%d P64=%d) → Puffer vergrößern, Config evtl. unvollständig",
+                 tr63, tr65, tr64);
 
     /* Aktive Messstellen aus P63 "i\<liste>" (z. B. "0,1" → Messstellen 0 und 1).
      * Genau diese Kanäle liefert '=' in derselben Reihenfolge. */
@@ -285,22 +292,32 @@ void AlmemoD7Sensor::sendCommand(const char *cmd)
     d7LogBytes("TX", cmd, len);
 }
 
-size_t AlmemoD7Sensor::readFrame(char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx)
+size_t AlmemoD7Sensor::readFrame(char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx, bool *truncated)
 {
-    size_t n   = 0;
+    size_t n   = 0;     // Nutzbytes in buf (ohne ETX)
     bool   etx = false;
+    char   rx[200];     // vollständiger Mitschnitt fürs Debug-Log (inkl. ETX), unabhängig von buf
+    size_t rxN = 0;
+    if (truncated)
+        *truncated = false;
     if (uart) {
         uint32_t start = millis();
         while (millis() - start < timeoutMs) {
             while (uart->available()) {
                 uint8_t c = uart->read();
-                start     = millis(); // solange Bytes fließen, Timeout nachladen
-                if (c == ETX) {       // Frame komplett — ETX nicht ablegen
+                start     = millis();  // solange Bytes fließen, Timeout nachladen
+                if (rxN < sizeof(rx))  // ALLES mitschneiden (auch ETX) — konsistentes RX-Log
+                    rx[rxN++] = (char)c;
+                if (c == ETX) {        // Frame komplett — ETX nicht in buf ablegen
                     etx = true;
                     break;
                 }
-                if (buf && cap && n < cap - 1) // überzählige Bytes weiter lesen, nur nicht speichern
-                    buf[n++] = (char)c;
+                if (buf && cap) {
+                    if (n < cap - 1)
+                        buf[n++] = (char)c;
+                    else if (truncated) // Puffer voll → dieses (und folgende) Byte verworfen
+                        *truncated = true;
+                }
             }
             if (etx)
                 break;
@@ -310,15 +327,15 @@ size_t AlmemoD7Sensor::readFrame(char *buf, size_t cap, uint32_t timeoutMs, bool
         buf[n] = '\0';
     if (gotEtx)
         *gotEtx = etx;
-    if (n || etx)
-        d7LogBytes("RX", buf ? buf : "", n);
+    if (rxN)
+        d7LogBytes("RX", rx, rxN);
     return n;
 }
 
-size_t AlmemoD7Sensor::exec(const char *cmd, char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx)
+size_t AlmemoD7Sensor::exec(const char *cmd, char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx, bool *truncated)
 {
     sendCommand(cmd);
-    return readFrame(buf, cap, timeoutMs, gotEtx);
+    return readFrame(buf, cap, timeoutMs, gotEtx, truncated);
 }
 
 // =========================================================================
@@ -381,7 +398,7 @@ bool AlmemoD7Sensor::cmdSetParam(char letter, uint8_t value)
     return etx;
 }
 
-bool AlmemoD7Sensor::cmdReadPage(uint8_t page, char *buf, size_t cap, uint32_t timeoutMs)
+bool AlmemoD7Sensor::cmdReadPage(uint8_t page, char *buf, size_t cap, uint32_t timeoutMs, bool *truncated)
 {
     if (!buf || !cap)
         return false;
@@ -390,7 +407,7 @@ bool AlmemoD7Sensor::cmdReadPage(uint8_t page, char *buf, size_t cap, uint32_t t
     char cmd[6];
     snprintf(cmd, sizeof(cmd), "P%02u", page);
     bool etx = false;
-    exec(cmd, buf, cap, timeoutMs, &etx);
+    exec(cmd, buf, cap, timeoutMs, &etx, truncated);
     if (!etx)
         return false;
 

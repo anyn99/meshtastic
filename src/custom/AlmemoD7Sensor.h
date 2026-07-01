@@ -86,15 +86,18 @@ class AlmemoD7Sensor
      * Einen Frame bis einschließlich ETX lesen. ETX wird NICHT in buf abgelegt;
      * buf wird nullterminiert. CR/LF bleiben erhalten.
      * @param gotEtx (optional) true, wenn ETX gesehen wurde (sonst Timeout).
+     * @param truncated (optional) true, wenn der Frame länger als der Puffer war
+     *        und hinten abgeschnitten wurde (Bytes verworfen).
      * @return Anzahl gespeicherter Nutzbytes (ohne ETX), geklammert auf cap-1.
      */
-    size_t readFrame(char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx = nullptr);
+    size_t readFrame(char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx = nullptr, bool *truncated = nullptr);
 
     /**
      * Kommando senden und Antwort-Frame lesen (sendCommand + readFrame).
      * @return wie readFrame; *gotEtx zeigt einen kompletten Frame an.
      */
-    size_t exec(const char *cmd, char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx = nullptr);
+    size_t exec(const char *cmd, char *buf, size_t cap, uint32_t timeoutMs, bool *gotEtx = nullptr,
+                bool *truncated = nullptr);
 
     // =======================================================================
     //  High-Level-Kommandos — einzeln aufrufbar
@@ -115,8 +118,10 @@ class AlmemoD7Sensor
     /**
      * P<nn>: Konfigurationsseite lesen. Roh-Nutzlast (Echo/CRLF/ETX entfernt) in
      * buf nullterminiert ablegen — zum Weiterverarbeiten mit den Token-Helfern.
+     * @param truncated (optional) true, wenn die Seite größer als cap war und
+     *        abgeschnitten wurde → Puffer vergrößern.
      */
-    bool cmdReadPage(uint8_t page, char *buf, size_t cap, uint32_t timeoutMs = 200);
+    bool cmdReadPage(uint8_t page, char *buf, size_t cap, uint32_t timeoutMs = 200, bool *truncated = nullptr);
 
     /**
      * '=': aktuelle Messwerte abrufen. Alle Kanäle nach out (max maxOut),
