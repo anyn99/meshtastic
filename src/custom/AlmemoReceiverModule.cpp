@@ -278,14 +278,14 @@ uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id, uint8_t sub)
 void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent)
 {
     /* Kommentar = node short name (last 4 hex of node_id) + decoded sub index.
-     * sub packs (channel << 2) | valueIndex (see AlmemoValue::slot):
+     * sub packs (channel << 4) | valueIndex (see AlmemoValue::slot):
      *   channel 0  → loose single values (e.g. SHT)        → "NNNN.S<v>"
      *   channel >0 → ALMEMO sensor, numbered from 1 in the   → "NNNN.C<c>S<v>"
      *                packet but shown 0-based here (channel-1).
      * Keeps several values from the same sender distinguishable. */
     const unsigned node16  = (unsigned)(node_id & 0xFFFF);
-    const uint8_t  channel = sub >> 2;
-    const uint8_t  valIdx  = sub & 0x03;
+    const uint8_t  channel = almemoSlotChannel(sub);
+    const uint8_t  valIdx  = almemoSlotValueIndex(sub);
     char comment[11];
     if (channel == 0)
         snprintf(comment, sizeof(comment), "%04X.S%u", node16, valIdx);

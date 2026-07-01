@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AlmemoPacket.h"
+#include "AlmemoCommon.h"
 #include "concurrency/OSThread.h"
 #include "mesh/SinglePortModule.h"
 #include <stddef.h>
@@ -181,7 +181,8 @@ class AlmemoReceiverModule : public SinglePortModule
         memcpy(&pkt, mp.decoded.payload.bytes, size < sizeof(pkt) ? size : sizeof(pkt));
 
         if (pkt.version != ALMEMO_PACKET_VERSION) {
-            LOG_WARN("AlmemoRx: version %u != %u (sender out of date?)", pkt.version, ALMEMO_PACKET_VERSION);
+            LOG_ERROR("AlmemoRx: packet version mismatch: got %u, expected %u — sender/receiver firmware out of sync, packet dropped",
+                      pkt.version, ALMEMO_PACKET_VERSION);
             return ProcessMessage::CONTINUE;
         }
         if (pkt.count > ALMEMO_MAX_VALUES || size != almemoPacketSize(pkt.count)) {

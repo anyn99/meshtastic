@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AlmemoCommon.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <stddef.h>
@@ -50,11 +51,17 @@ class AlmemoD7Sensor
     static constexpr char    KV  = '\\'; /* Key/Value-Trenner (0x5C) */
     static constexpr char    SEP = ';';  /* Token-/Wert-Trenner */
 
+    /* Der D7 (ZPD700-FS) führt bis zu 10 Messstellen (0..9) — siehe P19 "M10" /
+     * P70 "M0010" und die P65-Liste M\0.0..0.9. Dank 4-Bit-valueIndex im Paket
+     * (AlmemoValue::slot, seit v3) passen alle 10 unter einen channel. Die aktiven
+     * Kanäle liegen als kompakte AlmemoSlot-Liste vor (valueIndex = Messstelle). */
+    static constexpr uint8_t MAX_SLOTS = 10;
+
     /**
      * I2C-Erkennungs-Handshake.
      * @return true wenn an 0x50 ein ALMEMO D7 antwortet (Typ-Byte == 0x7B).
      */
-    static bool probe(TwoWire &wire);
+    static bool probe_I2C(TwoWire &wire);
 
     /**
      * UART übernehmen und einmalig die Setup-Sequenz fahren. Der Aufrufer muss
@@ -121,6 +128,16 @@ class AlmemoD7Sensor
     uint8_t format() const { return fFormat; }
 
     // =======================================================================
+    //  Messkanäle / Slots — analog zum ALMEMO-I2C-Treiber
+    // =======================================================================
+
+    /** Anzahl der beim Setup erkannten aktiven Messkanäle (0..MAX_SLOTS). */
+    uint8_t numSlots() const { return slotCount; }
+
+    /** Metadaten (valueIndex/Einheit/Exponent) des i-ten aktiven Kanals; i < numSlots(). */
+    const AlmemoSlot &slot(uint8_t i) const { return slots[i]; }
+
+    // =======================================================================
     //  Diagnose — zum Erkunden unbekannter Seiten/Felder (rein lesend)
     // =======================================================================
 
@@ -170,9 +187,28 @@ class AlmemoD7Sensor
     static size_t decodeToUtf8(const char *in, size_t len, char *out, size_t outCap);
 
   private:
-    Stream *uart    = nullptr;
-    uint8_t fFormat = 0; /* zuletzt per f<mode> gesetztes Ausgabeformat */
+    Stream    *uart    = nullptr;
+    uint8_t    fFormat = 0; /* zuletzt per f<mode> gesetztes Ausgabeformat */
+    AlmemoSlot slots[MAX_SLOTS]{};
+    uint8_t    slotCount = 0;
+    char       deviceName[24]{}; /* Typ/Firmware aus t0 (für Logs) */
 
-    void        runSetup();
+    void runSetup();
+
+    /**
+     * Aktive Messkanäle aus der Geräte-Config einlesen (P63/P65/P64) und slots[]
+     * füllen. Alles-oder-nichts: kann eine Messstelle nicht vollständig aufgelöst
+     * werden (Bereich/Einheit/Kommastellen), wird mit LOG_ERROR abgebrochen und
+     * slotCount bleibt 0 — keine Default-Einheit/-Exponent.
+     */
+    void parseConfig();
+
+    /* P65: Bereich-Code der Messstelle mst nach codeBuf (z. B. "-01"). */
+    static bool bereichForMessstelle(const char *p65, uint8_t mst, char *codeBuf, size_t codeCap);
+    /* P64: Einheit + Exponent (aus 1$/1K) des Bereichs code. */
+    static bool bereichUnitExp(const char *p64, const char *code, char unit[3], int8_t &exp);
+    /* Config-Einheit ("##C"/0xF8C/"oC"/"V") in eine paketfertige 2-Byte-Einheit normieren. */
+    static void normalizeUnit(const char *src, char out[3]);
+
     static bool parseValue(const char *s, float &out);
 };

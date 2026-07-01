@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AlmemoCommon.h"
 #include <Wire.h>
 #include <stdint.h>
 
@@ -35,24 +36,11 @@ class AlmemoI2CSensor
     static constexpr uint8_t MAX_SLOTS   = 4;
     static constexpr uint8_t SLOT_SIZE   = 0x3C; /* 60 */
 
-    enum SensorType : uint8_t {
-        TYPE_NONE    = 0xFF,
-        TYPE_DIGITAL = 0x37,
-        TYPE_ANALOG  = 0x09,
-    };
-
     /** Ergebnis eines Messwert-Lesevorgangs. */
     enum class ReadResult : uint8_t {
         Ok,           /* gültiger Wert (status=0x40) */
         NotConnected, /* kein ACK auf dem Bus → Sensor abgesteckt */
         BadValue,     /* Gerät antwortet, aber status != 0x40 → echter Lesefehler */
-    };
-
-    struct SlotInfo {
-        bool    present;     /* type != 0xFF */
-        uint8_t type;
-        int8_t  exponent;    /* dekodiert aus oberem Nibble, Vorzeichen-Magnitude */
-        char    unit[3];     /* 2 ASCII + NUL */
     };
 
     /**
@@ -62,38 +50,39 @@ class AlmemoI2CSensor
     static bool probe(TwoWire &wire);
 
     /**
-     * Probe + Metadaten einlesen (Name, Version, alle 4 Slot-Infos).
-     * Loggt erkannte Sensoren als LOG_INFO.
-     * @return true wenn 0x50 erreichbar.
+     * Probe + Metadaten einlesen (Name, Version). Legt für jeden EEPROM-Slot mit
+     * bekanntem Sensortyp einen AlmemoSlot an (kompakte Liste, keine Lücken).
+     * @return true wenn 0x50 erreichbar UND mindestens ein Sensor gefunden.
      */
     bool begin(TwoWire &wire);
 
     /**
-     * Rohwert (int16, unskaliert) von Slot N lesen — so wie ihn der Sensor
-     * über I2C liefert. Der zugehörige Exponent/Einheit steht in slot(N).
+     * Rohwert (int16, unskaliert) des i-ten Slots lesen (i < numSlots()).
+     * Der zugehörige Exponent/Einheit steht in slot(i).
      * @return ReadResult::Ok bei gültigem Wert; NotConnected wenn der Sensor
      *         nicht (mehr) ackt; BadValue wenn er antwortet, aber status != 0x40.
      */
-    ReadResult readRaw(uint8_t slot, int16_t &raw);
+    ReadResult readRaw(uint8_t i, int16_t &raw);
 
     /**
-     * Messwert von Slot N lesen. Skaliert mit dekodiertem Exponent.
-     * @return ReadResult::Ok bei gültigem Wert; NotConnected wenn der Sensor
-     *         nicht (mehr) ackt; BadValue wenn er antwortet, aber status != 0x40.
+     * Messwert des i-ten Slots lesen, skaliert mit dekodiertem Exponent.
+     * @return wie readRaw.
      */
-    ReadResult readValue(uint8_t slot, float &out);
+    ReadResult readValue(uint8_t i, float &out);
 
-    const SlotInfo &slot(uint8_t i) const { return slots[i]; }
-    const char     *deviceName() const { return name; }
-    const char     *deviceVersion() const { return version; }
-    uint8_t         numPresent() const;
+    uint8_t           numSlots() const { return slotCount; }
+    const AlmemoSlot &slot(uint8_t i) const { return slots[i]; }
+    const char       *deviceName() const { return name; }
+    const char       *deviceVersion() const { return version; }
 
   private:
-    TwoWire *wire = nullptr;
-    SlotInfo slots[MAX_SLOTS]{};
-    char     name[9]{};
-    char     version[9]{};
+    TwoWire   *wire = nullptr;
+    AlmemoSlot slots[MAX_SLOTS]{};
+    uint8_t    slotCount = 0;
+    char       name[9]{};
+    char       version[9]{};
 
     bool readMem(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len);
-    void parseSlot(uint8_t i, const uint8_t *block);
+    /* Block eines EEPROM-Slots dekodieren; bei bekanntem Typ out füllen und true. */
+    static bool parseSlot(uint8_t hwSlot, const uint8_t *block, AlmemoSlot &out);
 };

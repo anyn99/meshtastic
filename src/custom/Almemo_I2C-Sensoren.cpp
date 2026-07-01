@@ -4,14 +4,14 @@
 
 namespace
 {
-/* 10^e Lookup für Exponenten -4..+4 (digitale ALMEMO-Sensoren). */
-float pow10f(int8_t e)
-{
-    static const float tbl[] = {1.0f, 10.0f, 100.0f, 1000.0f, 10000.0f};
-    if (e >= 0)
-        return (e <= 4) ? tbl[e] : 1.0f;
-    return (e >= -4) ? (1.0f / tbl[-e]) : 1.0f;
-}
+/* Bekannte ALMEMO-Sensortypen (Byte an Offset 0 des EEPROM-Slots). Nur diese
+ * gelten als belegter Slot; alles andere (leerer Slot 0xFF, D7-Kennung 0x7B,
+ * Busmüll) legt keinen Slot an. Iterierbar → neuen Sensortyp einfach als weitere
+ * Zeile ergänzen. */
+constexpr uint8_t KNOWN_SENSOR_TYPES[] = {
+    0x37, // digital
+    0x09, // analog (NTC)
+};
 } // namespace
 
 bool AlmemoI2CSensor::probe(TwoWire &wire)
@@ -47,33 +47,41 @@ bool AlmemoI2CSensor::readMem(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t l
     return true;
 }
 
-void AlmemoI2CSensor::parseSlot(uint8_t i, const uint8_t *block)
+bool AlmemoI2CSensor::parseSlot(uint8_t hwSlot, const uint8_t *block, AlmemoSlot &out)
 {
-    SlotInfo &s = slots[i];
-    s.type     = block[0];
-    /* Nur bekannte ALMEMO-Typen gelten als belegter Slot. Alles andere (z. B. die
-     * D7-Kennung 0x7B oder Busmüll) ist KEIN Sensor → present = false. */
-    s.present  = (s.type == TYPE_DIGITAL || s.type == TYPE_ANALOG);
+    /* Typ-Byte gegen die bekannten Sensortypen prüfen. 0xFF = leerer Slot. */
+    uint8_t type  = block[0];
+    bool    known = false;
+    for (uint8_t kt : KNOWN_SENSOR_TYPES)
+        if (type == kt) {
+            known = true;
+            break;
+        }
+    if (!known) {
+        if (type != 0xFF)
+            LOG_DEBUG("AlmemoI2C: Unknown Sensor Type 0x%02X", type);
+        return false;
+    }
 
-    /* Weder belegter Slot noch „leer" (0xFF) → unbekannter Typ, kurz melden. */
-    if (!s.present && s.type != TYPE_NONE)
-        LOG_DEBUG("AlmemoI2C: Unknown Sensor Type 0x%02X", s.type);
+    out.valueIndex = hwSlot; // EEPROM-Slot-Index → Paket-valueIndex
 
     /* Exponent aus oberem Nibble (digital):
      *   Bit3 = Vorzeichen (1 → negativ), Bit2-0 = Magnitude 0..4. */
-    uint8_t hi = (block[1] >> 4) & 0x0F;
+    uint8_t hi  = (block[1] >> 4) & 0x0F;
     uint8_t mag = hi & 0x07;
     bool    neg = (hi & 0x08) != 0;
-    s.exponent  = neg ? -(int8_t)mag : (int8_t)mag;
+    out.exponent = neg ? -(int8_t)mag : (int8_t)mag;
 
-    s.unit[0] = (char)block[0x1E];
-    s.unit[1] = (char)block[0x1F];
-    s.unit[2] = '\0';
+    out.unit[0] = (char)block[0x1E];
+    out.unit[1] = (char)block[0x1F];
+    out.unit[2] = '\0';
+    return true;
 }
 
 bool AlmemoI2CSensor::begin(TwoWire &w)
 {
-    wire = &w;
+    wire      = &w;
+    slotCount = 0;
 
     if (!probe(*wire)) {
         //LOG_DEBUG("AlmemoI2C: no ACK @0x%02x", EEPROM_ADDR);
@@ -89,32 +97,32 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
 
     static constexpr uint8_t SLOT_BASE[MAX_SLOTS] = {0x08, 0x44, 0x80, 0xBC};
 
-    for (uint8_t i = 0; i < MAX_SLOTS; i++) {
-        if (!readMem(EEPROM_ADDR, SLOT_BASE[i], buf, SLOT_SIZE)) {
-            slots[i] = SlotInfo{};
+    /* Für jeden EEPROM-Slot mit bekanntem Sensortyp einen AlmemoSlot anlegen —
+     * kompakte Liste, leere/fremde Slots werden übersprungen. */
+    for (uint8_t hw = 0; hw < MAX_SLOTS; hw++) {
+        if (!readMem(EEPROM_ADDR, SLOT_BASE[hw], buf, SLOT_SIZE))
             continue;
-        }
-        parseSlot(i, buf);
-        if (slots[i].present) {
-            LOG_INFO("AlmemoI2C: slot %u type=0x%02x exp=%d unit='%s'",
-                     i, slots[i].type, slots[i].exponent, slots[i].unit);
+        AlmemoSlot s;
+        if (parseSlot(hw, buf, s)) {
+            slots[slotCount++] = s;
+            LOG_INFO("AlmemoI2C: slot %u (hw %u) exp=%d unit='%s'", slotCount - 1, hw, s.exponent, s.unit);
         }
     }
 
-    LOG_INFO("AlmemoI2C: name='%s' ver='%s' present=%u", name, version, numPresent());
+    LOG_INFO("AlmemoI2C: name='%s' ver='%s' slots=%u", name, version, slotCount);
     /* 0x50 ackt zwar, aber ohne einen einzigen bekannten Sensor-Typ ist das kein
      * ALMEMO-EEPROM-Gerät (z. B. ein D7 oder Fremdgerät) → als „nicht da" melden. */
-    return numPresent() > 0;
+    return slotCount > 0;
 }
 
-AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readRaw(uint8_t slot, int16_t &raw)
+AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readRaw(uint8_t i, int16_t &raw)
 {
-    if (!wire || slot >= MAX_SLOTS || !slots[slot].present)
+    if (!wire || i >= slotCount)
         return ReadResult::NotConnected;
 
     uint8_t buf[4];
-    /* Kein ACK auf 0x40 → Sensor ist vom Bus abgesteckt. */
-    if (!readMem(VALUE_ADDR, slot, buf, 4))
+    /* Wertregister = EEPROM-Slot-Index des Slots. Kein ACK auf 0x40 → abgesteckt. */
+    if (!readMem(VALUE_ADDR, slots[i].valueIndex, buf, 4))
         return ReadResult::NotConnected;
 
     /* buf[0] ist üblicherweise 0x00, buf[1] = Status:
@@ -127,20 +135,11 @@ AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readRaw(uint8_t slot, int16_t &raw)
     return ReadResult::Ok;
 }
 
-AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readValue(uint8_t slot, float &out)
+AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readValue(uint8_t i, float &out)
 {
     int16_t raw;
-    ReadResult rr = readRaw(slot, raw);
+    ReadResult rr = readRaw(i, raw);
     if (rr == ReadResult::Ok)
-        out = (float)raw * pow10f(slots[slot].exponent);
+        out = almemoScaleFromRaw(raw, slots[i].exponent);
     return rr;
-}
-
-uint8_t AlmemoI2CSensor::numPresent() const
-{
-    uint8_t n = 0;
-    for (uint8_t i = 0; i < MAX_SLOTS; i++)
-        if (slots[i].present)
-            n++;
-    return n;
 }

@@ -4,9 +4,9 @@
 #include "configuration.h"
 
 #include "Almemo_I2C-Sensoren.h"
+#include "AlmemoCommon.h"
 #include "AlmemoD7Sensor.h"
 #include "AlmemoLed.h"
-#include "AlmemoPacket.h"
 #if defined(ALMEMO_EINK)
 #include "AlmemoEinkDisplay.h"
 #endif
@@ -205,7 +205,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             muxPresent[ch] = almemoMux[ch].begin(Wire);
             if (muxPresent[ch]) {
                 muxCount++;
-                LOG_INFO("AlmemoSender: mux ch%u ALMEMO ready (%u slots)", ch, almemoMux[ch].numPresent());
+                LOG_INFO("AlmemoSender: mux ch%u ALMEMO ready (%u slots)", ch, almemoMux[ch].numSlots());
             }
         }
         tcaDeselect();
@@ -255,7 +255,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         /* D7: Erkennung allein über das Typ-Byte 0x7B (I2C-Handshake). Danach
          * laufen die Messwerte über UART. Entweder ein D7 wird erkannt – oder
          * eben nicht. */
-        if (AlmemoD7Sensor::probe(Wire)) {
+        if (AlmemoD7Sensor::probe_I2C(Wire)) {
             /* Nach der I2C-Erkennung braucht der Sensor einen Moment, bevor er
              * über UART antwortet (in der ersten Sekunde noch nicht bereit). */
             delay(D7_READY_DELAY_MS);
@@ -267,8 +267,8 @@ class AlmemoSenderThread : public concurrency::OSThread
             /* Einmalige Erkundung direkt nach der Erkennung: alle Seiten/Formate
              * und Textfelder ins Log dumpen. BLOCKIEREND (mehrere Sekunden) — nur
              * für die Protokoll-Analyse gedacht, bei Bedarf Bereich eingrenzen. */
-            d7.dumpTextFields();
-            d7.dumpPages();
+            //d7.dumpTextFields();
+            //d7.dumpPages();
 
             source = SRC_ALMEMO_D7;
             LOG_INFO("AlmemoSender: ALMEMO D7 ready");
@@ -282,7 +282,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         }
         if (almemo.begin(Wire)) {
             source = SRC_ALMEMO;
-            LOG_INFO("AlmemoSender: ALMEMO source ready (%u slots)", almemo.numPresent());
+            LOG_INFO("AlmemoSender: ALMEMO source ready (%u slots)", almemo.numSlots());
             return true;
         }
         if (sht.begin(ALMEMO_SHT_ADDR)) {
@@ -294,38 +294,23 @@ class AlmemoSenderThread : public concurrency::OSThread
 #endif
     }
 
-    /** Einen AlmemoValue an pkt anhängen, sofern noch Platz ist. */
-    static void appendValue(AlmemoSensorPacket &pkt, uint8_t slotId, char u0, char u1, int8_t exp, int16_t raw)
-    {
-        if (pkt.count >= ALMEMO_MAX_VALUES)
-            return;
-        AlmemoValue &v = pkt.values[pkt.count++];
-        v.slot     = slotId;
-        v.unit[0]  = u0;
-        v.unit[1]  = u1;
-        v.exponent = exp;
-        v.raw      = raw;
-    }
-
     /**
-     * Alle vorhandenen Slots eines ALMEMO-Geräts roh auslesen und als
-     * AlmemoValue (Einheit + Exponent + Rohwert) an pkt anhängen.
-     * @param slotIdBase channel<<2: oberer Teil der slot-Identität. Der ALMEMO-
-     *        Sensor-Channel startet bei 1 (0 ist Einzelwerten wie SHT vorbehalten),
-     *        valueIndex 0..3 (= Slot s im Gerät) wird hier addiert.
+     * Alle Slots eines ALMEMO-Geräts roh auslesen und als AlmemoValue (Einheit +
+     * Exponent + Rohwert) an pkt anhängen.
+     * @param channel welcher physische Sensor/Stecker (bits 4-7 der slot-Identität).
+     *        Der ALMEMO-Sensor-Channel startet bei 1 (0 ist Einzelwerten wie SHT
+     *        vorbehalten); valueIndex = slot.valueIndex kommt aus almemoSlotId.
      */
-    static ReadStatus appendAlmemoValues(AlmemoI2CSensor &dev, AlmemoSensorPacket &pkt, uint8_t slotIdBase)
+    static ReadStatus appendAlmemoValues(AlmemoI2CSensor &dev, AlmemoSensorPacket &pkt, uint8_t channel)
     {
         using RR = AlmemoI2CSensor::ReadResult;
         bool anyOk = false, anyAnswered = false;
-        for (uint8_t s = 0; s < AlmemoI2CSensor::MAX_SLOTS; s++) {
-            const AlmemoI2CSensor::SlotInfo &info = dev.slot(s);
-            if (!info.present)
-                continue;
+        for (uint8_t i = 0; i < dev.numSlots(); i++) {
+            const AlmemoSlot &s = dev.slot(i);
             int16_t raw;
-            RR rr = dev.readRaw(s, raw);
+            RR rr = dev.readRaw(i, raw);
             if (rr == RR::Ok) {
-                appendValue(pkt, slotIdBase + s, info.unit[0], info.unit[1], info.exponent, raw);
+                almemoAppendValue(pkt, almemoSlotId(channel, s.valueIndex), s.unit[0], s.unit[1], s.exponent, raw);
                 anyOk = anyAnswered = true;
             } else if (rr == RR::BadValue) {
                 anyAnswered = true; /* Gerät antwortet, Wert ungültig */
@@ -347,20 +332,40 @@ class AlmemoSenderThread : public concurrency::OSThread
     {
         int16_t temp = 2400 + (rand() % 101) - 50;
         int16_t humi = 5000 + (rand() % 1001) - 500;
-        appendValue(pkt, 0, (char)0xF8, 'C', -2, temp);
-        appendValue(pkt, 1, '%', 'H', -2, humi);
+        almemoAppendValue(pkt, almemoSlotId(0, 0), (char)0xF8, 'C', -2, temp);
+        almemoAppendValue(pkt, almemoSlotId(0, 1), '%', 'H', -2, humi);
         LOG_DEBUG("AlmemoEmulator: temp=%d.%02d degC humi=%d.%02d %%rH", temp / 100, temp % 100, humi / 100, humi % 100);
         return ReadStatus::Ok;
     }
 
-    /** D7-Messwert über UART lesen und als nativen ALMEMO-Wert (°C, Exp -2) anhängen. */
+    /**
+     * Alle aktiven D7-Messkanäle über UART lesen ('=') und je Kanal als eigenen
+     * Slot anhängen — analog zu appendAlmemoValues beim I2C-Sensor. Einheit und
+     * Exponent kommen aus der beim Setup gelesenen Geräte-Config (slot(i)); der
+     * D7 ist EIN ALMEMO-Gerät → channel 1, Messstellen-Nummer als valueIndex
+     * (0..15, dank 4-Bit-valueIndex passen alle 10 Messstellen 0..9 hinein).
+     */
     ReadStatus appendD7Values(AlmemoSensorPacket &pkt)
     {
-        float t;
+        float  vals[AlmemoD7Sensor::MAX_SLOTS];
+        size_t n = d7.cmdMeasure(vals, AlmemoD7Sensor::MAX_SLOTS);
         /* Keine Antwort innerhalb des Timeouts → Sensor abgesteckt → neu proben. */
-        if (!d7.readValue(t))
+        if (n == 0)
             return ReadStatus::Disconnected;
-        appendValue(pkt, 0, (char)0xF8, 'C', -2, (int16_t)lroundf(t * 100.0f));
+
+        /* Ohne aufgelöste Config kennen wir weder Einheit noch Exponent → nichts
+         * senden (kein °C-Fake). Gerät antwortet aber → Fehler, nicht Disconnect. */
+        const uint8_t ns = d7.numSlots();
+        if (ns == 0) {
+            LOG_WARN("AlmemoSender: D7 config not parsed, not sending");
+            return ReadStatus::Error;
+        }
+
+        for (size_t i = 0; i < n && i < ns; i++) {
+            const AlmemoSlot &si = d7.slot((uint8_t)i);
+            almemoAppendValue(pkt, almemoSlotId(1, si.valueIndex), si.unit[0], si.unit[1], si.exponent,
+                              almemoScaleToRaw(vals[i], si.exponent));
+        }
         return ReadStatus::Ok;
     }
 
@@ -374,9 +379,9 @@ class AlmemoSenderThread : public concurrency::OSThread
         if (isnan(t) && isnan(h))
             return ReadStatus::Disconnected;
         if (!isnan(t))
-            appendValue(pkt, 0, (char)0xF8, 'C', -2, (int16_t)lroundf(t * 100.0f));
+            almemoAppendValue(pkt, almemoSlotId(0, 0), (char)0xF8, 'C', -2, (int16_t)lroundf(t * 100.0f));
         if (!isnan(h))
-            appendValue(pkt, 1, '%', 'H', -2, (int16_t)lroundf(h * 100.0f));
+            almemoAppendValue(pkt, almemoSlotId(0, 1), '%', 'H', -2, (int16_t)lroundf(h * 100.0f));
         return ReadStatus::Ok;
     }
 
@@ -387,7 +392,7 @@ class AlmemoSenderThread : public concurrency::OSThread
         switch (source) {
         case SRC_ALMEMO:
             /* Einzelner ALMEMO-Sensor (kein Mux) → channel 1. */
-            return appendAlmemoValues(almemo, pkt, 1u << 2);
+            return appendAlmemoValues(almemo, pkt, 1);
         case SRC_ALMEMO_MULTI: {
             /* Alle vorhandenen Mux-Kanäle senden: vor jedem Gerät den passenden
              * Kanal durchschalten und dessen Werte anhängen. Mux-Kanal ch →
@@ -397,7 +402,7 @@ class AlmemoSenderThread : public concurrency::OSThread
                 if (!muxPresent[ch])
                     continue;
                 tcaSelect(ch);
-                ReadStatus rs = appendAlmemoValues(almemoMux[ch], pkt, (uint8_t)((ch + 1) << 2));
+                ReadStatus rs = appendAlmemoValues(almemoMux[ch], pkt, (uint8_t)(ch + 1));
                 if (rs == ReadStatus::Ok)
                     anyOk = anyAnswered = true;
                 else if (rs == ReadStatus::Error)
@@ -439,7 +444,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             out[i] = AlmemoEinkSensorInfo{};
         switch (source) {
         case SRC_ALMEMO:
-            setEinkSensor(out[0], almemo.deviceName(), almemo.numPresent());
+            setEinkSensor(out[0], almemo.deviceName(), almemo.numSlots());
             break;
         case SRC_SHT:
             setEinkSensor(out[0], "SHT", 2); // Temperatur + Feuchte
@@ -451,7 +456,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             // Mux-Kanal ch -> Rechteck ch (feste Position); nur die ersten 4 Kanäle.
             for (uint8_t ch = 0; ch < 4; ch++)
                 if (muxPresent[ch])
-                    setEinkSensor(out[ch], almemoMux[ch].deviceName(), almemoMux[ch].numPresent());
+                    setEinkSensor(out[ch], almemoMux[ch].deviceName(), almemoMux[ch].numSlots());
             break;
         default:
             break;
