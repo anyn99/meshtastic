@@ -496,7 +496,7 @@ class AlmemoSenderThread : public concurrency::OSThread
 
         if (waitingForTxToSleep) {
             if (almemoLedThread)
-                almemoLedThread->pulseSend(); // Grün halten, solange noch gesendet wird
+                almemoLedThread->pulseSend(); // Blau halten, solange noch gesendet wird
             bool txDone = doPreflightSleep();
             bool timedOut = (millis() - waitStartMs) > ALMEMO_SENDER_TX_WAIT_TIMEOUT_MS;
             if (!txDone && !timedOut)
@@ -581,7 +581,7 @@ class AlmemoSenderThread : public concurrency::OSThread
 
         if (almemoLedThread) {
             almemoLedThread->setState(AlmemoLedState::Idle); // Fehlerzustand löschen
-            almemoLedThread->pulseSend();                    // grüner Sende-Puls
+            almemoLedThread->pulseSend();                    // blauer Sende-Puls
         }
 
         LOG_DEBUG("AlmemoSender [%s] %u value(s), %u bytes sent", sourceName(source), pkt.count, (unsigned)wireSize);

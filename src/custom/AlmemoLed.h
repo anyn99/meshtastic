@@ -34,7 +34,7 @@
 #define ALMEMO_LED_BLINK_OFF_MS 3000
 #endif
 
-// Wie lange Grün nach einem Sendevorgang sichtbar gehalten wird.
+// Wie lange Blau nach einem Sendevorgang sichtbar gehalten wird.
 // MUSS größer als ALMEMO_LED_IDLE_POLL_MS sein, sonst verschläft der Thread den Puls.
 #ifndef ALMEMO_LED_SEND_HOLD_MS
 #define ALMEMO_LED_SEND_HOLD_MS 150
@@ -67,8 +67,8 @@ class AlmemoLedThread : public concurrency::OSThread
     void setState(AlmemoLedState s) { state = s; }
 
     /**
-     * Grünen Sende-Puls auslösen bzw. verlängern (jeder Aufruf hält Grün ALMEMO_LED_SEND_HOLD_MS).
-     * Schaltet Grün sofort ein, damit der Flash auch dann sichtbar ist, wenn der LED-Thread
+     * Blauen Sende-Puls auslösen bzw. verlängern (jeder Aufruf hält Blau ALMEMO_LED_SEND_HOLD_MS).
+     * Schaltet Blau sofort ein, damit der Flash auch dann sichtbar ist, wenn der LED-Thread
      * gerade verdrängt wird (z. B. direkt nach dem Boot). Das Ausschalten erledigt runOnce().
      */
     void pulseSend()
