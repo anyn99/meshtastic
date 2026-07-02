@@ -251,7 +251,8 @@ class AlmemoSenderThread : public concurrency::OSThread
 #if defined(ALMEMO_EMULATOR)
         source = SRC_EMULATOR; // kein echtes I2C-Probing; Quelle ist immer "vorhanden"
         return true;
-#elif defined(ALMEMO_SENSOR_D7)
+#else
+#if defined(ALMEMO_SENSOR_D7)
         /* D7: Erkennung allein über das Typ-Byte 0x7B (I2C-Handshake). Danach
          * laufen die Messwerte über UART. Entweder ein D7 wird erkannt – oder
          * eben nicht. */
@@ -274,8 +275,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             LOG_INFO("AlmemoSender: ALMEMO D7 ready");
             return true;
         }
-        return false;
-#else
+#endif
         if (probeMux()) {
             source = SRC_ALMEMO_MULTI;
             return true;
