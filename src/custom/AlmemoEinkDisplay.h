@@ -161,7 +161,9 @@ class AlmemoEinkDisplay
 
                 // Über dem Rechteck: Positionsnummer links, Anzahl Messwerte rechts
                 display.setCursor(x, numYs[row]);
-                display.print((int)pos);
+                char pos_str[4];
+                snprintf(pos_str, sizeof(pos_str), "M%u", (pos-1));
+                display.print(pos_str);
                 if (s.present) {
                     char cnt[8];
                     const int n = snprintf(cnt, sizeof(cnt), "(%u)", s.valueCount);

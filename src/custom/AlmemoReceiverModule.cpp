@@ -279,8 +279,8 @@ void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub
 {
     /* Kommentar = node short name (last 4 hex of node_id) + decoded sub index.
      * sub packs (channel << 4) | valueIndex (see AlmemoValue::slot):
-     *   channel 0  → loose single values (e.g. SHT)        → "NNNN.S<v>"
-     *   channel >0 → ALMEMO sensor, numbered from 1 in the   → "NNNN.C<c>S<v>"
+     *   channel 0  → loose single values (e.g. SHT)        → "NNNN.<v>"
+     *   channel >0 → ALMEMO sensor, numbered from 1 in the   → "NNNN.M<c>.<v>"
      *                packet but shown 0-based here (channel-1).
      * Keeps several values from the same sender distinguishable. */
     const unsigned node16  = (unsigned)(node_id & 0xFFFF);
@@ -288,9 +288,9 @@ void I2CSlaveThread::initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub
     const uint8_t  valIdx  = almemoSlotValueIndex(sub);
     char comment[11];
     if (channel == 0)
-        snprintf(comment, sizeof(comment), "%04X.S%u", node16, valIdx);
+        snprintf(comment, sizeof(comment), "%04X.%u", node16, valIdx);
     else
-        snprintf(comment, sizeof(comment), "%04X.C%uS%u", node16, channel - 1, valIdx);
+        snprintf(comment, sizeof(comment), "%04X.M%u.%u", node16, channel - 1, valIdx);
 
     uint8_t buf[DIGITAL_SENSOR_INFO_SIZE];
     buildSensorInfo(buf, unit, exponent, comment);
