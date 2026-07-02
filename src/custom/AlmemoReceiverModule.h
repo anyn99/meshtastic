@@ -37,14 +37,14 @@
  *
  * Multi-value tracking
  * --------------------
- * Up to MAX_NODES (4) value streams can be represented simultaneously — the
+ * Up to MAX_SLOTS (4) value streams can be represented simultaneously — the
  * hard cap of the emulated ALMEMO device (4 EEPROM info blocks + 4 registers).
  * Each stream is keyed by (node_id, sub), where sub is the sender's ALMEMO
  * slot index, so one sender can contribute several values (temp, humidity, …),
  * each landing in its own slot. The slot's Kommentar shows "NNNN.S"
  * (node short name + sub); unit and exponent come straight from the packet.
  *
- * Slot assignment is first-come-first-served: the first MAX_NODES distinct
+ * Slot assignment is first-come-first-served: the first MAX_SLOTS distinct
  * (node_id, sub) streams each claim one of the 4 EEPROM sensor channels and
  * keep it for good. Once all 4 are taken, further new streams are ignored.
  *
@@ -73,12 +73,12 @@ class I2CSlaveThread : public concurrency::OSThread
     static constexpr size_t   EEPROM_SIZE = 256;
     static constexpr uint8_t  REG_COUNT   = 4;
     static constexpr size_t   REG_MAX     = 4; // bytes per register (always 4)
-    static constexpr uint8_t  MAX_NODES   = 4; // one slot per node (temp only)
+    static constexpr uint8_t  MAX_SLOTS   = 4; // one slot per (node_id, sub) stream (temp only)
 
     /* EEPROM contents — index 0 = 0x50, index 1 = 0x51 */
     uint8_t eeprom[2][EEPROM_SIZE];
 
-    /* Register device (0x40) — reg[i] holds the latest temp for nodes[i] */
+    /* Register device (0x40) — reg[i] holds the latest temp for slots[i] */
     uint8_t reg_data[REG_COUNT][REG_MAX];
     uint8_t reg_size[REG_COUNT]; // number of valid bytes per register (0..4)
 
@@ -89,7 +89,7 @@ class I2CSlaveThread : public concurrency::OSThread
      * dropped. For a temperature it claims a free slot for a new (node_id, sub)
      * pair (populating the EEPROM info block from unit + exponent) and updates
      * the live value register. Known pairs just update their value. New pairs
-     * are ignored once all MAX_NODES slots are taken.
+     * are ignored once all MAX_SLOTS slots are taken.
      * Called from the Router task, once per AlmemoValue in a packet.
      *
      * @param raw  raw int16 reading; physical = raw * 10^exponent.
@@ -112,13 +112,13 @@ class I2CSlaveThread : public concurrency::OSThread
     int32_t runOnce() override;
 
   private:
-    struct NodeEntry {
+    struct SlotEntry {
         uint32_t node_id;
         uint8_t  sub; /* sender ALMEMO slot index — part of the stream key */
         bool     in_use;
     };
 
-    NodeEntry nodes[MAX_NODES] = {};
+    SlotEntry slots[MAX_SLOTS] = {};
     uint32_t  muteUntilMs = 0;             /* 0 = not muted; otherwise wall-time deadline (I2CSlave task only) */
     volatile bool rescanRequested = false; /* set by onValue (Router task) → runOnce starts the mute */
 

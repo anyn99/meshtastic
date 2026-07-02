@@ -212,7 +212,7 @@ volatile uint8_t  I2CSlaveThread::s_write_count     = 0;
  * EEPROM slot layout (sensor info blocks live in eeprom[0])
  * ---------------------------------------------------------------------- */
 
-static constexpr uint8_t SLOT_OFFSET[I2CSlaveThread::MAX_NODES] = {
+static constexpr uint8_t SLOT_OFFSET[I2CSlaveThread::MAX_SLOTS] = {
     0x08, 0x44, 0x80, 0xBC
 };
 
@@ -236,7 +236,7 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
 
     /* All slots start empty; first packet from each node populates one. */
-    for (uint8_t i = 0; i < MAX_NODES; i++)
+    for (uint8_t i = 0; i < MAX_SLOTS; i++)
         clearSlot(i);
 
     /* Init GPIO, arm PORT SENSE, enable GPIOTE interrupt. */
@@ -260,17 +260,17 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
 /* -------------------------------------------------------------------------
  * Slot helpers
  *
- * onValue() runs on the Router task and is the only writer of nodes[]. The
+ * onValue() runs on the Router task and is the only writer of slots[]. The
  * table is first-come-first-served and never cleared at runtime, so there is
  * no task-vs-task race to guard against.
  * ---------------------------------------------------------------------- */
 
 uint8_t I2CSlaveThread::findOrAllocSlot(uint32_t node_id, uint8_t sub)
 {
-    for (uint8_t i = 0; i < MAX_NODES; i++)
-        if (nodes[i].in_use && nodes[i].node_id == node_id && nodes[i].sub == sub) return i;
-    for (uint8_t i = 0; i < MAX_NODES; i++)
-        if (!nodes[i].in_use) return i;
+    for (uint8_t i = 0; i < MAX_SLOTS; i++)
+        if (slots[i].in_use && slots[i].node_id == node_id && slots[i].sub == sub) return i;
+    for (uint8_t i = 0; i < MAX_SLOTS; i++)
+        if (!slots[i].in_use) return i;
     /* All 4 channels already taken — ignore this new stream. */
     return 0xFF;
 }
@@ -370,7 +370,7 @@ void I2CSlaveThread::onValue(uint32_t node_id, uint8_t sub, const char unit[2], 
     if (slot == 0xFF)
         return; /* all 4 channels taken — ignore this new stream */
 
-    NodeEntry &n = nodes[slot];
+    SlotEntry &n = slots[slot];
     if (!n.in_use) {
         /* First value for this (node_id, sub): claim the slot, fill its EEPROM
          * info block and ask the I2CSlave task to mute the bus so the master
