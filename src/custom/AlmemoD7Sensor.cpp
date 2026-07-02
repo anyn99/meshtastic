@@ -64,8 +64,26 @@ bool AlmemoD7Sensor::probe_I2C(TwoWire &wire)
         return false;
     if (wire.requestFrom((int)I2C_ADDR, 1) != 1)
         return false;
+    if (wire.read() != TYPE_D7)
+        return false;
 
-    return wire.read() == TYPE_D7;
+    /* Das Typ-Byte an 0x50 teilt sich der D7 mit einem D6. Zur eindeutigen
+     * Unterscheidung an 0x51 den D7-Ident-Handshake fahren: 0xF4 schreiben,
+     * dann 3 Bytes lesen — nur der D7 antwortet mit {0x00, 0x01, 0x3C}. */
+    wire.beginTransmission(ID_ADDR);
+    wire.write(ID_WRITE);
+    if (wire.endTransmission() != 0)
+        return false;
+
+    static constexpr uint8_t ID_REPLY[3] = {0x00, 0x01, 0x3C};
+    if (wire.requestFrom((int)ID_ADDR, (int)sizeof(ID_REPLY)) != (int)sizeof(ID_REPLY))
+        return false;
+    for (uint8_t i = 0; i < sizeof(ID_REPLY); i++) {
+        if (wire.read() != ID_REPLY[i])
+            return false;
+    }
+
+    return true;
 }
 
 // =========================================================================

@@ -42,6 +42,15 @@ class AlmemoD7Sensor
     static constexpr uint8_t  I2C_ADDR  = 0x50; /* I2C-Erkennungs-Adresse */
     static constexpr uint8_t  REG_TYPE  = 0x08; /* Register mit dem Typ-Byte */
     static constexpr uint8_t  TYPE_D7   = 0x7B; /* Kennung eines ALMEMO D7 */
+
+    /* Das Typ-Byte an 0x50 allein reicht nicht: ein D6 antwortet dort identisch.
+     * Zur sicheren Unterscheidung wird zusätzlich an 0x51 ein D7-spezifischer
+     * Ident-Handshake gefahren: 0xF4 schreiben, dann 3 Bytes lesen — der D7
+     * liefert exakt {0x00, 0x01, 0x3C}, ein D6 nicht. */
+    static constexpr uint8_t  ID_ADDR   = 0x51; /* Ident-Adresse */
+    static constexpr uint8_t  ID_WRITE  = 0xF4; /* Ident-Anfrage */
+    /* Erwartete 3-Byte-Ident-Antwort {0x00, 0x01, 0x3C} liegt in probe_I2C(). */
+
     static constexpr uint32_t UART_BAUD = 921600;
 
     // ---- Protokoll-Steuerzeichen ------------------------------------------
