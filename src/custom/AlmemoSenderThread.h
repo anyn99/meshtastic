@@ -3,7 +3,7 @@
 #include "concurrency/OSThread.h"
 #include "configuration.h"
 
-#include "Almemo_I2C-Sensoren.h"
+#include "AlmemoI2CSensor.h"
 #include "AlmemoCommon.h"
 #include "AlmemoD7Sensor.h"
 #include "AlmemoLed.h"
