@@ -375,9 +375,11 @@ void I2CSlaveThread::onValue(uint32_t node_id, uint8_t sub, const char unit[2], 
         /* First value for this (node_id, sub): claim the slot, fill its EEPROM
          * info block and ask the I2CSlave task to mute the bus so the master
          * rescans and discovers the new sensor. We only set the flag here (single
-         * atomic write); runOnce() owns the actual mute — and only acts on it on
-         * its next tick, i.e. after this onValue (incl. writeRawForSlot) has run,
-         * so the slot is always complete before the bus goes quiet. */
+         * atomic write); runOnce() (I2CSlave task) owns the actual mute. The two
+         * tasks are NOT synchronized, so runOnce() may start the mute between
+         * initSlotForNode() and the writeRawForSlot() below — that is harmless:
+         * muting only unregisters the I2C addresses, it never touches reg_data, and
+         * the value write still lands before the master can read again (after unmute). */
         n.in_use  = true;
         n.node_id = node_id;
         n.sub     = sub;
