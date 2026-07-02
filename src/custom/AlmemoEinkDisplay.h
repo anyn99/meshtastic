@@ -25,8 +25,8 @@
  * läuft lock-frei (epd2.isBusy()), damit der Radio-Task den Bus nicht verliert.
  *
  * Layout:
- *   - obere zwei Drittel: 4 nummerierte Rechtecke (2x2, ~20:8).
- *       hinten (obere Zeile) = 1 / 2, vorne (untere Zeile) = 3 / 4.
+ *   - obere zwei Drittel: 4 beschriftete Rechtecke (2x2, ~20:8), Label M<pos-1>.
+ *       hinten (obere Zeile) = M0 / M1, vorne (untere Zeile) = M2 / M3.
  *   - unteres Drittel: aktueller Sendeintervall + Sendezähler.
  */
 
@@ -43,7 +43,7 @@
 #define ALMEMO_EINK_RST -1
 #endif
 
-// Pro Rechteck (Sensorposition hinten 1/2, vorne 3/4) anzuzeigende Info.
+// Pro Rechteck (Sensorposition hinten M0/M1, vorne M2/M3) anzuzeigende Info.
 struct AlmemoEinkSensorInfo {
     bool present;        // false -> Rechteck zeigt nur die Position
     uint8_t valueCount;  // Anzahl Messwerte (max 4)
@@ -58,7 +58,7 @@ class AlmemoEinkDisplay
 
     uint32_t intervalSecs = 0; // aktueller Sendeintervall in Sekunden
     uint32_t sendCount = 0;    // Anzahl gesendeter Pakete (persistent über Warmstarts)
-    AlmemoEinkSensorInfo sensors[4] = {}; // 4 Rechtecke: hinten 1/2, vorne 3/4
+    AlmemoEinkSensorInfo sensors[4] = {}; // 4 Rechtecke: hinten M0/M1, vorne M2/M3
 
   public:
     // Controller einmalig initialisieren und sofort einen komplett leeren (weißen) Bildschirm
@@ -132,7 +132,7 @@ class AlmemoEinkDisplay
         const int H = display.height(); // 200
         const int topH = (H * 2) / 3;   // 133 -> obere zwei Drittel
 
-        // --- obere zwei Drittel: 4 Rechtecke (2x2), Positionsnummer AUSSERHALB
+        // --- obere zwei Drittel: 4 Rechtecke (2x2), Positionslabel (M<pos-1>) AUSSERHALB
         //     oben links über jedem Rechteck; im Rechteck "Name (Anzahl)" in Size 2.
         const int margin = 4;
         const int colGap = 6;
@@ -147,7 +147,8 @@ class AlmemoEinkDisplay
         const int xs[2] = {margin, margin + rectW + colGap};
         const int numYs[2] = {yTop, yTop + numH + rectH + rowGap}; // Oberkante der Nummer
 
-        // Nummerierung: hinten (obere Zeile) 1/2, vorne (untere Zeile) 3/4
+        // Beschriftung (Label = M<pos-1>): hinten (obere Zeile) M0/M1, vorne (untere Zeile) M2/M3.
+        // nums[][] ist der 1-basierte Positionsindex in sensors[pos-1].
         static const uint8_t nums[2][2] = {{1, 2}, {3, 4}};
 
         display.setTextWrap(false); // langen Namen abschneiden statt umbrechen
@@ -159,7 +160,7 @@ class AlmemoEinkDisplay
                 const uint8_t pos = nums[row][col];
                 const AlmemoEinkSensorInfo &s = sensors[pos - 1];
 
-                // Über dem Rechteck: Positionsnummer links, Anzahl Messwerte rechts
+                // Über dem Rechteck: Positionslabel (M<pos-1>) links, Anzahl Messwerte rechts
                 display.setCursor(x, numYs[row]);
                 char pos_str[4];
                 snprintf(pos_str, sizeof(pos_str), "M%u", (pos-1));
@@ -199,7 +200,7 @@ class AlmemoEinkDisplay
 /**
  * Display mit neuen Daten aktualisieren (zeichnet synchron). Vom AlmemoSenderThread
  * aufzurufen, sobald neue Daten gesendet wurden oder Sensoren an-/abgesteckt werden.
- * sensors[4] = die 4 Rechteck-Positionen (hinten 1/2, vorne 3/4).
+ * sensors[4] = die 4 Rechteck-Positionen (hinten M0/M1, vorne M2/M3).
  */
 void almemoEinkPublish(uint32_t intervalSecs, uint32_t sendCount, const AlmemoEinkSensorInfo sensors[4]);
 

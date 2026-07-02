@@ -437,7 +437,7 @@ class AlmemoSenderThread : public concurrency::OSThread
             e.name[--n] = '\0';
     }
 
-    /** Die 4 Display-Rechtecke (hinten 1/2, vorne 3/4) aus der aktiven Quelle befüllen. */
+    /** Die 4 Display-Rechtecke (hinten M0/M1, vorne M2/M3) aus der aktiven Quelle befüllen. */
     void fillEinkSensors(AlmemoEinkSensorInfo out[4]) const
     {
         for (int i = 0; i < 4; i++)
