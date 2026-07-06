@@ -210,10 +210,11 @@ class AlmemoD7Sensor
     void runSetup();
 
     /**
-     * Aktive Messkanäle aus der Geräte-Config einlesen (P63/P65/P64) und slots[]
-     * füllen. Alles-oder-nichts: kann eine Messstelle nicht vollständig aufgelöst
-     * werden (Bereich/Einheit/Kommastellen), wird mit LOG_ERROR abgebrochen und
-     * slotCount bleibt 0 — keine Default-Einheit/-Exponent.
+     * Aktive Messkanäle aus der Geräte-Config einlesen (P65/P64) und slots[] füllen.
+     * Belegte Sensor-Messstellen kommen aus P65 (Bereich-Code "-NN", NICHT "-00" und
+     * NICHT die numerischen Funktionskanäle wie Batt "14") — exakt die Kanäle, die '='
+     * liefert. Für einen belegten Kanal ohne Einheit/Kommastellen in P64 wird mit
+     * LOG_ERROR abgebrochen und slotCount bleibt 0 — keine Default-Einheit/-Exponent.
      */
     void parseConfig();
 

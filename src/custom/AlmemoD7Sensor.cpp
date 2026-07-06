@@ -117,7 +117,7 @@ void AlmemoD7Sensor::runSetup()
     cmdSetParam('N', 2);               // N2
     cmdReadPage(15, buf, sizeof(buf)); // P15 — Messstellen-Legende (nur Log)
 
-    /* Dimensionen der aktiven Kanäle aus der Geräte-Config bestimmen (P63/P65/P64)
+    /* Dimensionen der aktiven Kanäle aus der Geräte-Config bestimmen (P65/P64)
      * — genau wie der Original-Logger, der daraus Einheit/Kommastellen kennt. */
     parseConfig();
 
@@ -139,49 +139,41 @@ void AlmemoD7Sensor::parseConfig()
     /* P64 listet ALLE Bereichsdefinitionen (Sensor + Funktionskanäle) → kann groß
      * werden; großzügig dimensionieren, sonst fällt hinten ein referenzierter
      * Bereich raus. tr* meldet stilles Abschneiden (Frame > Puffer). */
-    char       p63[48], p65[384], p64[1024];
-    bool       tr63 = false, tr65 = false, tr64 = false;
-    const bool ok63 = cmdReadPage(63, p63, sizeof(p63), 200, &tr63); // aktive Messstellen
+    char       p65[384], p64[1024];
+    bool       tr65 = false, tr64 = false;
     const bool ok65 = cmdReadPage(65, p65, sizeof(p65), 200, &tr65); // Messstelle→Bereich
     const bool ok64 = cmdReadPage(64, p64, sizeof(p64), 200, &tr64); // Bereich→Einheit/Kommastellen
-    if (!ok63 || !ok65 || !ok64) {
-        LOG_ERROR("AlmemoD7: config read failed (P63=%d P65=%d P64=%d) → config aborted", ok63, ok65, ok64);
+    if (!ok65 || !ok64) {
+        LOG_ERROR("AlmemoD7: config read failed (P65=%d P64=%d) → config aborted", ok65, ok64);
         return;
     }
-    if (tr63 || tr65 || tr64)
-        LOG_WARN("AlmemoD7: config page truncated (P63=%d P65=%d P64=%d) → Puffer vergrößern, Config evtl. unvollständig",
-                 tr63, tr65, tr64);
+    if (tr65 || tr64)
+        LOG_WARN("AlmemoD7: config page truncated (P65=%d P64=%d) → Puffer vergrößern, Config evtl. unvollständig", tr65,
+                 tr64);
 
-    /* Aktive Messstellen aus P63 "i\<liste>" (z. B. "0,1" → Messstellen 0 und 1).
-     * Genau diese Kanäle liefert '=' in derselben Reihenfolge. */
-    size_t      ilen  = 0;
-    const char *ilist = findValue(p63, "i", &ilen);
-    if (!ilist) {
-        LOG_ERROR("AlmemoD7: P63 without active-channel list → config aborted");
-        return;
-    }
+    /* Aktive Messstellen direkt aus P65 ableiten (nicht mehr aus P63 "i\<liste>"):
+     * P65 mappt jede Messstelle 0..9 auf ihren Bereich-Code. '=' liefert AUSSCHLIESSLICH
+     * echte Sensor-Messbereiche (Code "-NN") in aufsteigender Messstellen-Reihenfolge —
+     * NICHT die unbelegten ("-00") und NICHT die Funktionskanäle (Batt "14", Diff "71",
+     * … — rein numerischer Code). Nur "-NN != -00" wird also zum Slot; alles andere
+     * überspringen, sonst verschiebt sich die Wert↔Slot-Zuordnung im Sender. Das
+     * entkoppelt uns zugleich von P63, das je nach Geräte-/N-Zustand auch unbelegte
+     * Messstellen auflisten und dann fälschlich die ganze Config abschießen konnte. */
+    for (uint8_t mst = 0; mst < MAX_SLOTS; mst++) {
+        char code[12];
+        if (!bereichForMessstelle(p65, mst, code, sizeof(code)))
+            continue; // Messstelle nicht im P65-Map → existiert nicht
 
-    for (const char *s = ilist; s < ilist + ilen && slotCount < MAX_SLOTS;) {
-        if (*s < '0' || *s > '9') {
-            s++;
-            continue;
-        }
-        uint8_t mst = 0;
-        while (s < ilist + ilen && *s >= '0' && *s <= '9')
-            mst = (uint8_t)(mst * 10 + (*s++ - '0'));
+        if (code[0] != '-' || strcmp(code, "-00") == 0)
+            continue; // Funktionskanal (numerisch) oder unbelegt ("-00") → nicht in '=', kein Slot
 
-        /* Slot vollständig in ein lokales AlmemoSlot parsen; jeder fehlende
-         * Baustein (Bereich in P65, Einheit+Kommastellen in P64) bricht die
-         * gesamte Config ab — kein Default für Einheit/Exponent. */
+        /* Belegten Sensor-Kanal vollständig in ein lokales AlmemoSlot parsen. Fehlt
+         * dafür Einheit/Kommastellen in P64, wird die ganze Config abgebrochen
+         * (slotCount=0) — kein Default für Einheit/Exponent, und ein Überspringen
+         * würde die Wert↔Slot-Zuordnung verschieben ('=' liefert ja einen Wert). */
         AlmemoSlot parsed;
         parsed.valueIndex = mst; // Messstellen-Nummer → Paket-valueIndex
 
-        char code[12];
-        if (!bereichForMessstelle(p65, mst, code, sizeof(code))) {
-            LOG_ERROR("AlmemoD7: Messstelle %u not in P65 → config aborted", mst);
-            slotCount = 0;
-            return;
-        }
         if (!bereichUnitExp(p64, code, parsed.unit, parsed.exponent)) {
             LOG_ERROR("AlmemoD7: Bereich '%s' (Mst %u) unit/exp missing in P64 → config aborted", code, mst);
             slotCount = 0;
