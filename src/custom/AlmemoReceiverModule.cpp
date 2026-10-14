@@ -4,7 +4,29 @@
 
 extern "C" {
 #include "i2c_bb_slave.h"
+#if defined(I2C_SLAVE_USE_TWIS)
+#include "i2c_twis_slave.h"
+#endif
 }
+
+/* Atomic section helpers for task-context writes into the slave buffers.
+ * Bitbang path: disable the shared GPIOTE IRQ.
+ * TWIS path:    disable both TWIS hardware-instance IRQs. */
+#if defined(I2C_SLAVE_USE_TWIS)
+#  define I2C_SLAVE_IRQ_DISABLE()                                              \
+      do {                                                                     \
+          NVIC_DisableIRQ(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQn);             \
+          NVIC_DisableIRQ(SPIM1_SPIS1_TWIM1_TWIS1_SPI1_TWI1_IRQn);             \
+      } while (0)
+#  define I2C_SLAVE_IRQ_ENABLE()                                               \
+      do {                                                                     \
+          NVIC_EnableIRQ(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQn);              \
+          NVIC_EnableIRQ(SPIM1_SPIS1_TWIM1_TWIS1_SPI1_TWI1_IRQn);              \
+      } while (0)
+#else
+#  define I2C_SLAVE_IRQ_DISABLE()  NVIC_DisableIRQ(GPIOTE_IRQn)
+#  define I2C_SLAVE_IRQ_ENABLE()   NVIC_EnableIRQ(GPIOTE_IRQn)
+#endif
 
 #include <nrf.h>      /* NRF_GPIOTE */
 #include <string.h>
@@ -138,10 +160,12 @@ extern "C" void GPIOTE_IRQHandler(void)
      * LED blinks once, system hangs → hang is outside ISR (task/scheduler). */
     nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(0, 6)); /* ON — active-low, common anode */
 
+#if !defined(I2C_SLAVE_USE_TWIS)
     if (NRF_GPIOTE->EVENTS_PORT)
     {
         i2c_bb_slave_gpiote_irq_handler();
     }
+#endif
 
     /* Dispatch EVENTS_IN callbacks (radio DIO1, EXT_CHRG_DETECT, …).
      * Clears each EVENTS_IN register before invoking the callback — prevents
@@ -170,9 +194,9 @@ void I2CSlaveThread::writeEeprom(uint8_t addr, uint8_t offset, const uint8_t *da
     if (len > EEPROM_SIZE - offset)
         len = EEPROM_SIZE - offset;
 
-    NVIC_DisableIRQ(GPIOTE_IRQn);
+    I2C_SLAVE_IRQ_DISABLE();
     memcpy(&eeprom[idx][offset], data, len);
-    NVIC_EnableIRQ(GPIOTE_IRQn);
+    I2C_SLAVE_IRQ_ENABLE();
 }
 
 /* -------------------------------------------------------------------------
@@ -184,10 +208,10 @@ void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
     if (reg >= REG_COUNT)
         return;
 
-    NVIC_DisableIRQ(GPIOTE_IRQn);
+    I2C_SLAVE_IRQ_DISABLE();
     memcpy(reg_data[reg], data, REG_MAX);
     reg_size[reg] = REG_MAX;
-    NVIC_EnableIRQ(GPIOTE_IRQn);
+    I2C_SLAVE_IRQ_ENABLE();
 }
 
 /* -------------------------------------------------------------------------
@@ -224,17 +248,26 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     initSensorBuffer(&s_sensors[0], &eeprom[0][0x80], DIGITAL_SENSOR_INFO_SIZE);
     initSensorBuffer(&s_sensors[0], &eeprom[0][0xBC], DIGITAL_SENSOR_INFO_SIZE);
 
+#if defined(I2C_SLAVE_USE_TWIS)
+    i2c_twis_slave_init();
+#else
     /* Init GPIO, arm PORT SENSE, enable GPIOTE interrupt. */
     i2c_bb_slave_init();
+#endif
 
     /* Prepare blue LED (P0.06) for ISR debug (LED_STATE_ON=0, common anode). */
     nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(0, 6));
     nrf_gpio_pin_set(NRF_GPIO_PIN_MAP(0, 6)); /* start OFF */
 
+#if defined(I2C_SLAVE_USE_TWIS)
+    i2c_twis_slave_register(0x50, onWrite, onRead);
+    i2c_twis_slave_register(0x51, onWrite, onRead);
+    i2c_twis_slave_register(0x40, onWrite, onRead);
+#else
     i2c_bb_slave_register(0x50, onWrite, onRead);
     i2c_bb_slave_register(0x51, onWrite, onRead);
     i2c_bb_slave_register(0x40, onWrite, onRead);
-
+#endif
 }
 
 /* -------------------------------------------------------------------------
@@ -258,6 +291,18 @@ int32_t I2CSlaveThread::runOnce()
         return 0; /* sofort wiederkommen falls noch ein Write anliegt */
     }
 
+#if defined(I2C_SLAVE_USE_TWIS)
+    LOG_INFO("TWISSlave: wr=%lu rd=%lu stop=%lu err=%lu errsrc=0x%lx "
+             "m50=%lu m51=%lu m40=%lu",
+             (uint32_t)i2c_twis_slave_stats.writes,
+             (uint32_t)i2c_twis_slave_stats.reads,
+             (uint32_t)i2c_twis_slave_stats.stopped,
+             (uint32_t)i2c_twis_slave_stats.errors,
+             (uint32_t)i2c_twis_slave_stats.last_errorsrc,
+             (uint32_t)i2c_twis_slave_stats.match_0x50,
+             (uint32_t)i2c_twis_slave_stats.match_0x51,
+             (uint32_t)i2c_twis_slave_stats.match_0x40);
+#else
     const volatile uint32_t *p = i2c_bb_slave_stats.scl_periods;
     uint8_t n = i2c_bb_slave_stats.scl_period_idx;
     if (n > I2C_BB_SCL_PERIOD_LOG) n = I2C_BB_SCL_PERIOD_LOG;
@@ -277,6 +322,7 @@ int32_t I2CSlaveThread::runOnce()
              (uint32_t)p[4],  (uint32_t)p[5],  (uint32_t)p[6],  (uint32_t)p[7],
              (uint32_t)p[8],  (uint32_t)p[9],  (uint32_t)p[10], (uint32_t)p[11],
              (uint32_t)p[12], (uint32_t)p[13], (uint32_t)p[14], (uint32_t)p[15]);
+#endif
 
     return 5000;
 
