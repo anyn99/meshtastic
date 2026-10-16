@@ -84,6 +84,8 @@ class AlmemoI2CSensor
     char       name[9]{};
     char       version[9]{};
     uint8_t    typeByte = ALMEMO_TYPE_NONE;
+    /* Fingerprint des letzten geloggten Ergebnisses — s. begin(). */
+    uint32_t   lastLogFp = 0;
 
     bool readMem(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len);
     /* Block eines EEPROM-Slots dekodieren; bei bekanntem Typ out füllen und true. */

@@ -141,10 +141,13 @@ class AlmemoSenderThread : public concurrency::OSThread
         Ok,           // mindestens ein gültiger Wert
         Disconnected, // Sensor nicht mehr erreichbar → zurück auf SRC_NONE / gelb
         Error,        // Quelle antwortet, liefert aber keinen gültigen Wert → rot
+        Empty,        // Quelle erkannt, hat aber keine Messstellen → nichts zu senden
     };
 
     SensorSource source = SRC_NONE;
     bool waitingForTxToSleep = false;
+    /* Im Empty-Zustand nur EINMAL ans Display melden, s. runOnce(). */
+    bool emptyPublished = false;
     uint32_t waitStartMs = 0;
 
     static bool sensorPowerSaving()
@@ -333,6 +336,20 @@ class AlmemoSenderThread : public concurrency::OSThread
     static ReadStatus appendAlmemoValues(AlmemoI2CSensor &dev, AlmemoSensorPacket &pkt, uint8_t channel)
     {
         using RR = AlmemoI2CSensor::ReadResult;
+
+        if (dev.numSlots() == 0) {
+            /* Geraet ohne initialisierte Messstellen. Der Leseweg fasst dann gar
+             * nicht den Bus an, ein Abziehen bliebe also unsichtbar -- darum
+             * hier explizit auf Anwesenheit proben. Beim Mux ist der passende
+             * Kanal vom Aufrufer bereits durchgeschaltet.
+             *
+             * Dieser Probe traegt zugleich die Neuerkennung: bekommt der
+             * aufgesteckte Receiver Messstellen, initialisiert er seinen
+             * I2C-Bus neu und faellt kurz weg -> Disconnected -> SRC_NONE ->
+             * vollstaendiges Probing. Siehe den Empty-Zweig in runOnce(). */
+            return AlmemoI2CSensor::probe(Wire) ? ReadStatus::Empty : ReadStatus::Disconnected;
+        }
+
         bool anyOk = false, anyAnswered = false;
         for (uint8_t i = 0; i < dev.numSlots(); i++) {
             const AlmemoSlot &s = dev.slot(i);
@@ -426,19 +443,24 @@ class AlmemoSenderThread : public concurrency::OSThread
             /* Alle vorhandenen Mux-Kanäle senden: vor jedem Gerät den passenden
              * Kanal durchschalten und dessen Werte anhängen. Mux-Kanal ch →
              * Paket-channel ch+1 (channel 0 = Einzelwerte/SHT). */
-            bool anyOk = false, anyAnswered = false;
+            bool anyOk = false, anyAnswered = false, anyPresent = false;
             for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++) {
                 if (!muxPresent[ch])
                     continue;
                 tcaSelect(ch);
                 ReadStatus rs = appendAlmemoValues(almemoMux[ch], pkt, (uint8_t)(ch + 1));
                 if (rs == ReadStatus::Ok)
-                    anyOk = anyAnswered = true;
+                    anyOk = anyAnswered = anyPresent = true;
                 else if (rs == ReadStatus::Error)
-                    anyAnswered = true;
+                    anyAnswered = anyPresent = true;
+                else if (rs == ReadStatus::Empty)
+                    anyPresent = true; /* da, aber ohne Messstellen */
                 /* Disconnected: dieser Kanal liefert (gerade) nichts → überspringen */
             }
-            return anyOk ? ReadStatus::Ok : (anyAnswered ? ReadStatus::Error : ReadStatus::Disconnected);
+            return anyOk          ? ReadStatus::Ok
+                   : anyAnswered  ? ReadStatus::Error
+                   : anyPresent   ? ReadStatus::Empty
+                                  : ReadStatus::Disconnected;
         }
         case SRC_SHT:
             return appendShtValues(pkt);
@@ -635,6 +657,45 @@ class AlmemoSenderThread : public concurrency::OSThread
         pkt.timestamp = getTime();
 
         ReadStatus rs = buildValues(pkt);
+        if (rs != ReadStatus::Empty)
+            emptyPublished = false;
+
+        if (rs == ReadStatus::Empty) {
+            /* Geraet erkannt, hat aber keine Messstellen: Quelle BEHALTEN (kein
+             * Re-Probing, es ist ja nichts weggefallen) und nichts senden -- ein
+             * Paket ohne Werte waere nur Funklast. Dem Display aber einmal die
+             * Kennung zeigen, damit die Sensor-Seite stimmt.
+             *
+             * Nur einmal, weil publishEinkNow() einen ~2,6 s langen
+             * E-Paper-Refresh anstoesst -- den nicht alle 500 ms. Der
+             * Sendezaehler bleibt unveraendert, es wurde ja nichts gesendet. */
+            if (almemoLedThread)
+                almemoLedThread->setState(AlmemoLedState::Idle);
+            if (!emptyPublished) {
+                emptyPublished = true;
+                LOG_INFO("AlmemoSender [%s] erkannt, aber ohne Messstellen", sourceName(source));
+#if defined(ALMEMO_EINK)
+                publishEinkNow(lastSendCount);
+#endif
+#if defined(ALMEMO_OLED)
+                {
+                    AlmemoMenuSensorInfo menuInfo;
+                    fillMenuInfo(menuInfo);
+                    almemoOledPublish(pkt, menuInfo, lastSendCount, intervalMs() / 1000);
+                }
+#endif
+            }
+
+            /* KEINE periodische Neuerkennung von hier aus: bekommt der
+             * aufgesteckte Receiver neue Messstellen, macht er selbst einen
+             * Reinit seines I2C-Busses. Er fällt dadurch kurz vom Bus, der
+             * Anwesenheits-Probe oben schlägt fehl -> Disconnected -> der
+             * normale Pfad setzt SRC_NONE und probt komplett neu, inklusive der
+             * jetzt belegten Slots. Deshalb ist dieser Probe im Nullslot-Fall
+             * nicht bloss Hygiene, sondern der Mechanismus, der das auslöst. */
+            return ALMEMO_SENDER_PROBE_INTERVAL_MS;
+        }
+
         if (rs != ReadStatus::Ok) {
             if (rs == ReadStatus::Disconnected) {
                 LOG_WARN("AlmemoSender: sensor disconnected, re-probing");

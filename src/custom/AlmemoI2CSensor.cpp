@@ -136,6 +136,27 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
         trimSpaces(version);
     }
 
+    /* Die Generation steckt in der VERSIONSNUMMER (immer an 0xF8 lesbar, auch
+     * ohne eine einzige initialisierte Messstelle): 6.xx = D6, 7.xx = D7. Ein
+     * Slot-Byte taugt dafuer nicht, weil es erst existiert, wenn ein Slot
+     * belegt ist.
+     *
+     * Ein D7 ackt auf 0x50 ebenfalls, hat dort aber kein EEPROM-Slot-Layout.
+     * Hier gleich abweisen, damit probeSensors() auf den D7-Pfad durchfallen
+     * kann -- auch in Builds ohne ALMEMO_SENSOR_D7, wo der D7-Probe nicht
+     * vorlaeuft -- und damit die vier Seitenlesungen unten entfallen. */
+    if (version[0] == '7' && version[1] == '.')
+        return false;
+    if (version[0] == '6' && version[1] == '.')
+        typeByte = ALMEMO_TYPE_D6;
+
+    /* Version und Slot-Byte beschreiben zwei Achsen: die Version die
+     * Generation, das Slot-Byte die Sensorart (0x09 analog / 0x37 digital).
+     * Deshalb gilt die Version nur als Vorbelegung und der erste belegte Slot
+     * praezisiert sie -- so bleibt ANALOG erhalten, und ohne belegten Slot
+     * bleibt es bei der Generation. */
+    bool typeFromSlot = false;
+
     static constexpr uint8_t SLOT_BASE[MAX_SLOTS] = {0x08, 0x44, 0x80, 0xBC};
 
     /* Für jeden EEPROM-Slot mit bekanntem Sensortyp einen AlmemoSlot anlegen —
@@ -145,18 +166,37 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
             continue;
         AlmemoSlot s;
         if (parseSlot(hw, buf, s)) {
-            /* Kennung des ersten belegten Slots merken — kennzeichnet den Fuehler. */
-            if (typeByte == ALMEMO_TYPE_NONE)
-                typeByte = buf[0];
+            /* Erster belegter Slot praezisiert die Vorbelegung (s. oben). */
+            if (!typeFromSlot) {
+                typeFromSlot = true;
+                typeByte     = buf[0];
+            }
             slots[slotCount++] = s;
             LOG_INFO("AlmemoI2C: slot %u (hw %u) exp=%d unit='%s'", slotCount - 1, hw, s.exponent, s.unit);
         }
     }
 
-    LOG_INFO("AlmemoI2C: name='%s' ver='%s' slots=%u", name, version, slotCount);
-    /* 0x50 ackt zwar, aber ohne einen einzigen bekannten Sensor-Typ ist das kein
-     * ALMEMO-EEPROM-Gerät (z. B. ein D7 oder Fremdgerät) → als „nicht da" melden. */
-    return slotCount > 0;
+    /* Nur loggen, wenn sich das Ergebnis geaendert hat: begin() laeuft in
+     * mehreren Pfaden wiederholt durch -- im Probe-Intervall alle 500 ms,
+     * solange nichts erkannt ist, und bei SRC_ALMEMO_MULTI ueber refreshMux()
+     * in jedem Sendezyklus einmal pro Kanal. Ohne Gate flutet das das Log; das
+     * fiel erst auf, als der Bus zuverlaessig auf 50 kHz blieb und das Geraet
+     * dadurch jedes Mal antwortete. */
+    uint32_t fp = slotCount + 1u;
+    for (const char *p = name; *p; p++)
+        fp = fp * 31u + (uint8_t)*p;
+    for (const char *p = version; *p; p++)
+        fp = fp * 31u + (uint8_t)*p;
+    if (fp != lastLogFp) {
+        lastLogFp = fp;
+        LOG_INFO("AlmemoI2C: name='%s' ver='%s' slots=%u", name, version, slotCount);
+    }
+    /* Das Geraet gilt als erkannt, sobald 0x50 ackt -- AUCH ohne einen
+     * einzigen belegten Slot. Ein Fuehler ohne initialisierte Messstellen (etwa
+     * unser Receiver, bevor sein Sensor eingerichtet ist) ist dann eben ein
+     * Geraet ohne Messwerte: Kennung und Version stehen, Kanaele 0, keine
+     * Werte. Der Leseweg meldet das als ReadStatus::Empty. */
+    return true;
 }
 
 AlmemoI2CSensor::ReadResult AlmemoI2CSensor::readRaw(uint8_t i, int16_t &raw)

@@ -138,7 +138,7 @@ class AlmemoMenuLocal
         poll();
     }
 
-    /** Sensor weg: Werte verwerfen, Struktur auf "Kein Sensor" stellen. */
+    /** Sensor weg: Werte verwerfen, Struktur auf "Keine Messstellen" stellen. */
     void clear()
     {
         AlmemoSensorPacket empty = {};
@@ -393,7 +393,10 @@ class AlmemoMenuLocal
             b.page(buf, MenuPageKind::Status);
 
             if (!n) {
-                b.item("Kein Sensor", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+                /* Gilt fuer beide Faelle: nichts gesteckt, und Geraet erkannt
+                 * aber ohne initialisierte Messstellen. Die Sensor-Seite zeigt
+                 * ohnehin, was dran ist. */
+                b.item("Keine Messstellen", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
                 continue;
             }
             for (uint8_t r = 0; r < MENU_ROWS; r++) {
