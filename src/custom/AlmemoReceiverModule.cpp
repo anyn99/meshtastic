@@ -52,7 +52,7 @@ bool loopCanSleep()
  * SensorTyp 0xFF = slot empty / not configured.
  *
  * EEPROM 0 (address 0x50) layout:
- *   0x00–0x07  device name      ("FHAD46  ")
+ *   0x00–0x07  device name      ("LORA-GW ")
  *   0x08–0x43  sensor slot 0    (DIGITAL_SENSOR_INFO_SIZE = 60 bytes)
  *   0x44–0x7F  sensor slot 1    (60 bytes)
  *   0x80–0xBB  sensor slot 2    (60 bytes)
@@ -231,8 +231,20 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     memset(reg_data, 0, sizeof(reg_data));
     memset(reg_size, 0, sizeof(reg_size));
 
-    /* EEPROM 0 (0x50): device identity at start, firmware version at end. */
-    memcpy(&eeprom[0][0x00], "FHAD46  ", 8);
+    /* EEPROM 0 (0x50): device identity at start, firmware version at end.
+     * Both fields are 8 bytes, space-padded the ALMEMO way -- name left, version
+     * right aligned.
+     *
+     * Die VERSION ist tragend, nicht Kosmetik: der Node leitet daraus die
+     * Geraetegeneration ab (6.xx = D6, 7.xx = D7, s. AlmemoI2CSensor::begin()).
+     * Auf 7.xx geaendert wuerde er uns als D7 abweisen und auf den D7-UART-Pfad
+     * schicken, wo wir nicht antworten. Also bei 6.xx bleiben.
+     *
+     * Der NAME ist frei -- der Node nimmt jeden String. Ob die ALMEMO-Logger ihn
+     * nur anzeigen oder gegen eine Typentabelle pruefen, ist unklar: vorher
+     * stand hier "FHAD46  ", die Kennung eines echten Ahlborn-Fuehlers. Falls
+     * ein Logger den Fuehler nicht mehr annimmt, ist das der erste Verdacht. */
+    memcpy(&eeprom[0][0x00], "LORA-GW ", 8);
     strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
 
     /* All slots start empty; first packet from each node populates one. */
