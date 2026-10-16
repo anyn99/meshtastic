@@ -7,6 +7,7 @@
 #include "AlmemoCommon.h"
 #include "AlmemoD7Sensor.h"
 #include "AlmemoI2CClock.h"
+#include "AlmemoMenuWire.h"
 #include "AlmemoLed.h"
 #if defined(ALMEMO_EINK)
 #include "AlmemoEinkDisplay.h"
@@ -148,6 +149,8 @@ class AlmemoSenderThread : public concurrency::OSThread
     bool waitingForTxToSleep = false;
     /* Im Empty-Zustand nur EINMAL ans Display melden, s. runOnce(). */
     bool emptyPublished = false;
+    /* Letzter geloggter Andock-Zustand, s. probeSensors(). */
+    bool menuDockedLogged = false;
     uint32_t waitStartMs = 0;
 
     static bool sensorPowerSaving()
@@ -204,6 +207,40 @@ class AlmemoSenderThread : public concurrency::OSThread
     {
         Wire.beginTransmission(addr);
         return Wire.endTransmission() == 0;
+    }
+
+    /**
+     * Menue-Kanal des aufgesteckten Receivers suchen (Andock-Kennung).
+     *
+     * Gelesen wird nur das Kopffenster und das Magic geprueft -- das
+     * unterscheidet einen Receiver von irgendeinem Geraet, das auf der Adresse
+     * zufaellig ackt. 0x41 ist in Meshtastics Tabelle INA_ADDR_ALTERNATE, ein
+     * ACK allein waere also keine Aussage.
+     *
+     * Vorerst NUR Erkennung: das Sensor-Probing laeuft unveraendert weiter, der
+     * Receiver wird also nach wie vor als ALMEMO-Geraet ohne Messstellen
+     * gefunden. Das Unterdruecken von 0x50/0x51 kommt, wenn das Menue
+     * tatsaechlich uebertragen wird.
+     */
+    static bool menuChannelPresent(MenuWireHeader *out = nullptr)
+    {
+        Wire.beginTransmission(ALMEMO_MENU_I2C_ADDR);
+        Wire.write((uint8_t)ALMEMO_MENU_OFF_HEADER);
+        if (Wire.endTransmission() != 0)
+            return false;
+
+        MenuWireHeader h{};
+        if (Wire.requestFrom((int)ALMEMO_MENU_I2C_ADDR, (int)sizeof(h)) != (int)sizeof(h))
+            return false;
+        uint8_t *dst = (uint8_t *)&h;
+        for (size_t i = 0; i < sizeof(h); i++)
+            dst[i] = (uint8_t)Wire.read();
+
+        if (h.magic != ALMEMO_MENU_MAGIC)
+            return false;
+        if (out)
+            *out = h;
+        return true;
     }
 
     /** Reines Adress-Probing des Multiplexers @0x70. */
@@ -273,6 +310,24 @@ class AlmemoSenderThread : public concurrency::OSThread
         source = SRC_EMULATOR; // kein echtes I2C-Probing; Quelle ist immer "vorhanden"
         return true;
 #else
+        /* Andock-Kennung zuerst: steckt ein Receiver, soll das spaeter das
+         * Sensor-Probing ersetzen. Heute nur geloggt, und nur bei Wechsel --
+         * probeSensors() laeuft im 500-ms-Takt, solange nichts erkannt ist. */
+        {
+            MenuWireHeader mh{};
+            const bool     docked = menuChannelPresent(&mh);
+            if (docked != menuDockedLogged) {
+                menuDockedLogged = docked;
+                if (docked)
+                    LOG_INFO("AlmemoSender: Receiver angedockt (Menue @0x%02x, Modell v%u, hash %08lx)",
+                             (unsigned)ALMEMO_MENU_I2C_ADDR, (unsigned)mh.modelVersion,
+                             (unsigned long)mh.hash);
+                else
+                    LOG_INFO("AlmemoSender: Receiver abgezogen (kein Menue @0x%02x)",
+                             (unsigned)ALMEMO_MENU_I2C_ADDR);
+            }
+        }
+
 #if defined(ALMEMO_SENSOR_D7)
         /* D7: Erkennung allein über das Typ-Byte 0x7B (I2C-Handshake). Danach
          * laufen die Messwerte über UART. Entweder ein D7 wird erkannt – oder

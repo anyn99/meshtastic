@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AlmemoCommon.h"
+#include "AlmemoMenuWire.h"
 #include "concurrency/OSThread.h"
 #include "mesh/SinglePortModule.h"
 #include <stddef.h>
@@ -134,6 +135,10 @@ class I2CSlaveThread : public concurrency::OSThread
     /* Internal state (accessed from ISR — keep volatile) */
     static volatile uint8_t s_eeprom_ptr[2]; // current address pointer per EEPROM
     static volatile uint8_t s_reg_ptr;       // current register for 0x40
+    static volatile uint8_t s_menu_ptr;      // current offset in the menu window
+    /* Kopf des Menue-Kanals. Vorerst nur Magic + Modellversion: der Node
+     * erkennt daran, dass hier ein Receiver steckt. Struktur und Werte folgen. */
+    static MenuWireHeader   s_menu_hdr;
 
     /* Singleton pointer so static callbacks can reach instance data */
     static I2CSlaveThread *s_instance;

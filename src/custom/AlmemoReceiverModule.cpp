@@ -202,6 +202,8 @@ void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
 
 volatile uint8_t  I2CSlaveThread::s_eeprom_ptr[2]  = {0, 0};
 volatile uint8_t  I2CSlaveThread::s_reg_ptr         = 0;
+volatile uint8_t  I2CSlaveThread::s_menu_ptr        = 0;
+MenuWireHeader    I2CSlaveThread::s_menu_hdr        = {};
 I2CSlaveThread   *I2CSlaveThread::s_instance        = nullptr;
 volatile bool     I2CSlaveThread::s_write_pending   = false;
 volatile uint8_t  I2CSlaveThread::s_write_addr      = 0;
@@ -244,6 +246,14 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
      * nur anzeigen oder gegen eine Typentabelle pruefen, ist unklar: vorher
      * stand hier "FHAD46  ", die Kennung eines echten Ahlborn-Fuehlers. Falls
      * ein Logger den Fuehler nicht mehr annimmt, ist das der erste Verdacht. */
+    /* Menue-Kanal: vorerst NUR der Kopf, mit Magic und Modellversion. Der Node
+     * erkennt daran, dass hier ein Receiver und kein ALMEMO-Fuehler steckt
+     * (Andock-Kennung, s. AlmemoMenuWire.h). Alle Zaehler und der Hash bleiben
+     * 0, bis die Struktur wirklich uebertragen wird -- der Node darf daraus
+     * also noch keine Struktur ableiten. */
+    s_menu_hdr.magic        = ALMEMO_MENU_MAGIC;
+    s_menu_hdr.modelVersion = ALMEMO_MENU_MODEL_VERSION;
+
     memcpy(&eeprom[0][0x00], "LORA-GW ", 8);
     strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
 
@@ -267,6 +277,12 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
     i2c_bb_slave_register(0x50, onWrite, onRead);
     i2c_bb_slave_register(0x51, onWrite, onRead);
     i2c_bb_slave_register(0x40, onWrite, onRead);
+    /* Vierte und damit LETZTE freie Adresse: I2C_BB_MAX_ADDRESSES ist 4. Die
+     * uebrigen Aufrufe ignorieren ihren Rueckgabewert, ein fuenfter Eintrag
+     * wuerde also still scheitern -- hier deshalb laut. */
+    if (!i2c_bb_slave_register(ALMEMO_MENU_I2C_ADDR, onWrite, onRead))
+        LOG_ERROR("I2CSlave: Menue-Adresse 0x%02x nicht registriert, Tabelle voll (max %u)",
+                  (unsigned)ALMEMO_MENU_I2C_ADDR, (unsigned)I2C_BB_MAX_ADDRESSES);
 }
 
 /* -------------------------------------------------------------------------
@@ -359,6 +375,12 @@ void I2CSlaveThread::unmuteI2C()
     i2c_bb_slave_register(0x50, onWrite, onRead);
     i2c_bb_slave_register(0x51, onWrite, onRead);
     i2c_bb_slave_register(0x40, onWrite, onRead);
+    /* Vierte und damit LETZTE freie Adresse: I2C_BB_MAX_ADDRESSES ist 4. Die
+     * uebrigen Aufrufe ignorieren ihren Rueckgabewert, ein fuenfter Eintrag
+     * wuerde also still scheitern -- hier deshalb laut. */
+    if (!i2c_bb_slave_register(ALMEMO_MENU_I2C_ADDR, onWrite, onRead))
+        LOG_ERROR("I2CSlave: Menue-Adresse 0x%02x nicht registriert, Tabelle voll (max %u)",
+                  (unsigned)ALMEMO_MENU_I2C_ADDR, (unsigned)I2C_BB_MAX_ADDRESSES);
     NVIC_EnableIRQ(GPIOTE_IRQn);
     muteUntilMs = 0;
     LOG_INFO("I2CSlave: un-muted, addresses re-registered");
@@ -589,6 +611,12 @@ void I2CSlaveThread::onWrite(uint8_t addr, const uint8_t *buf, uint8_t len)
     } else if (addr == 0x40) {
         if (buf[0] < REG_COUNT)
             s_reg_ptr = buf[0];
+    } else if (addr == ALMEMO_MENU_I2C_ADDR) {
+        /* Nur der Adresszeiger ins Lesefenster. Edits (itemIdx + raw) kommen
+         * spaeter als laengerer Write dazu; bis dahin alles > 1 Byte verwerfen,
+         * wie bei den EEPROM-Adressen auch. */
+        if (len == 1)
+            s_menu_ptr = buf[0];
     }
 }
 
@@ -607,6 +635,19 @@ uint8_t I2CSlaveThread::onRead(uint8_t addr, uint8_t *buf, uint8_t max_len)
         for (uint8_t i = 0; i < len; i++) {
             buf[i] = s_instance->eeprom[idx][s_eeprom_ptr[idx]++];
         }
+        return len;
+    } else if (addr == ALMEMO_MENU_I2C_ADDR) {
+        /* Vorerst nur das Kopffenster. Lesen ausserhalb liefert nichts, bis
+         * Struktur und Werte da sind -- der Master sieht dann NACK und weiss,
+         * dass es nichts zu holen gibt. */
+        const uint8_t *src = (const uint8_t *)&s_menu_hdr;
+        if (s_menu_ptr >= sizeof(s_menu_hdr))
+            return 0;
+        uint8_t len = (uint8_t)(sizeof(s_menu_hdr) - s_menu_ptr);
+        if (len > max_len)
+            len = max_len;
+        for (uint8_t i = 0; i < len; i++)
+            buf[i] = src[s_menu_ptr++];
         return len;
     } else if (addr == 0x40) {
         if (s_reg_ptr >= REG_COUNT)
