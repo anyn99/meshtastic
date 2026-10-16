@@ -6,6 +6,7 @@
 #include "AlmemoI2CSensor.h"
 #include "AlmemoCommon.h"
 #include "AlmemoD7Sensor.h"
+#include "AlmemoI2CClock.h"
 #include "AlmemoLed.h"
 #if defined(ALMEMO_EINK)
 #include "AlmemoEinkDisplay.h"
@@ -189,12 +190,21 @@ class AlmemoSenderThread : public concurrency::OSThread
         Wire.endTransmission();
     }
 
-    /** Reines Adress-Probing des Multiplexers @0x70. */
-    static bool tcaPresent()
+    /**
+     * Reiner Adress-Probe mit UNSEREM Bustakt.
+     *
+     * Wird gebraucht, um fremde begin()-Methoden abzuschirmen: die rufen intern
+     * Wire.begin() und reissen damit FREQUENCY auf K100 (s. AlmemoI2CClock.h).
+     * Wer hier nicht ACKt, bekommt sein begin() gar nicht erst zu sehen.
+     */
+    static bool i2cPresent(uint8_t addr)
     {
-        Wire.beginTransmission(ALMEMO_TCA_ADDR);
+        Wire.beginTransmission(addr);
         return Wire.endTransmission() == 0;
     }
+
+    /** Reines Adress-Probing des Multiplexers @0x70. */
+    static bool tcaPresent() { return i2cPresent(ALMEMO_TCA_ADDR); }
 
     /**
      * Mux @0x70 erkennen und alle 8 Kanäle nach ALMEMO-Sensoren durchproben.
@@ -293,10 +303,21 @@ class AlmemoSenderThread : public concurrency::OSThread
             LOG_INFO("AlmemoSender: ALMEMO source ready (%u slots)", almemo.numSlots());
             return true;
         }
-        if (sht.begin(ALMEMO_SHT_ADDR)) {
-            source = SRC_SHT;
-            LOG_INFO("AlmemoSender: SHT @0x%02x ready", ALMEMO_SHT_ADDR);
-            return true;
+        /* NUR anfassen, wenn wirklich einer dranhaengt: sht.begin() ruft ueber
+         * Adafruit_I2CDevice::begin() bedingungslos Wire.begin() und setzt damit
+         * den Bustakt auf 100 kHz zurueck. Ohne diese Vorpruefung legt ein
+         * einziger erfolgloser Erkennungslauf den Bus dauerhaft auf 100 kHz --
+         * und dort antwortet der gedockte Receiver nicht mehr, womit die
+         * Erkennung weiter scheitert und wieder hier landet (Selbstverriegelung,
+         * in I2C-Mitschnitten nachgewiesen). */
+        if (i2cPresent(ALMEMO_SHT_ADDR)) {
+            const bool shtOk = sht.begin(ALMEMO_SHT_ADDR);
+            almemoI2cClockGuard(); /* begin() hat den Takt verstellt */
+            if (shtOk) {
+                source = SRC_SHT;
+                LOG_INFO("AlmemoSender: SHT @0x%02x ready", ALMEMO_SHT_ADDR);
+                return true;
+            }
         }
         return false;
 #endif
@@ -553,6 +574,10 @@ class AlmemoSenderThread : public concurrency::OSThread
 
     int32_t runOnce() override
     {
+        /* Bustakt zurueckholen, falls ein Fremdtreiber Wire.begin() gerufen hat.
+         * Deckt probeSensors(), refreshMux() und buildValues() in einem ab. */
+        almemoI2cClockGuard();
+
         const uint32_t cycleStartMs = millis();
 
         if (waitingForTxToSleep) {

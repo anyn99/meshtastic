@@ -4,6 +4,7 @@
 
 #if defined(ALMEMO_OLED)
 
+#include "AlmemoI2CClock.h"
 #include "AlmemoMenu.h"
 #include "AlmemoMenuLocal.h"
 #include "concurrency/OSThread.h"
@@ -31,8 +32,10 @@
  *
  * ---------------------------------------------------------------------------
  * WICHTIG, I2C-Bustakt: Das Display haengt am selben Bus (globales `Wire`) wie
- * der ALMEMO-Sensor, und der Bus MUSS auf 100 kHz bleiben (Levelumsetzer auf
- * der Sensorleitung). SSD1306Wire ruft in connect() `Wire.setClock(_frequency)`
+ * der ALMEMO-Sensor, und der laeuft auf ~50 kHz (Begruendung und Messwerte in
+ * AlmemoI2CClock.h); 400 kHz sind wegen des Levelumsetzers auf der
+ * Sensorleitung ohnehin ausgeschlossen.
+ * SSD1306Wire ruft in connect() `Wire.setClock(_frequency)`
  * mit Default 700000, und Wire_nRF52 klemmt alles > 250k auf 400 kHz. Deshalb
  * steht der letzte Konstruktorparameter auf -1: dann ueberspringt connect()
  * das setClock komplett. Diesen Parameter NICHT entfernen.
@@ -76,24 +79,39 @@
 #define ALMEMO_OLED_FLIP 1
 #endif
 
+/* ALMEMO_I2C_FREQUENCY_REG und der Guard stehen in AlmemoI2CClock.h. */
+
 /*
- * Roh-Wert fuer NRF_TWIM0->FREQUENCY (Wire haengt auf TWIM0).
+ * AlmemoSSD1306 — duenne Ableitung, nur um Wire.begin() einzufangen.
  *
- * Der ALMEMO-Logger faehrt den Bus mit 50 kHz, und der Bitbang-Slave des
- * Receivers ist darauf ausgelegt. Ueber die Arduino-API ist das nicht
- * erreichbar: Wire_nRF52::setClock() klemmt alles <= 100000 auf K100, und die
- * TWIM kennt offiziell nur K100/K250/K400.
+ * OLEDDisplay::init() ruft ueber allocateBuffer() -> connect() unbedingt
+ * Wire.begin(), und das setzt NRF_TWIM0->FREQUENCY auf K100 (Wire_nRF52.cpp:66).
+ * connect() laeuft dabei VOR sendInitCommands(): ohne diesen Haken ginge die
+ * komplette Init-Sequenz mit 100 kHz raus, also in dem Takt, in dem der Bus mit
+ * gedocktem Receiver nachweislich kaum funktioniert (in I2C-Mitschnitten
+ * antworten 0x3C und 0x50 dort zu 2 bzw. 6 %, bei ~50 kHz zu 100 %). Gehen die
+ * Init-Kommandos verloren, bleibt der Controller unkonfiguriert und damit
+ * dunkel, auch wenn spaeter alles mit 50 kHz ankommt — und neu initialisiert
+ * wird nie, weil die Lib kein ACK prueft.
  *
- * Das Register ist aber ein Frequenz-Skalierer mit f = FREQUENCY / 2^32 * 16 MHz
- * -- damit ergeben die dokumentierten Werte genau 100/250/400 kHz, und die
- * Haelfte von K100 (0x01980000) liefert ~49,8 kHz. Zwischenwerte sind
- * UNDOKUMENTIERT, funktionieren aber in der Praxis.
- *
- * Auf 0 setzen laesst den Bus bei den 100 kHz aus Wire.begin().
+ * Das Register wird hier DIREKT gesetzt und nicht ueber almemoI2cClockGuard():
+ * an dieser Stelle ist die Korrektur erwartet und keine Warnung wert, sonst
+ * waere die Warnung des Guards wertlos.
  */
-#ifndef ALMEMO_I2C_FREQUENCY_REG
-#define ALMEMO_I2C_FREQUENCY_REG 0x00CC0000UL /* ~49,8 kHz */
+class AlmemoSSD1306 : public SSD1306Wire
+{
+  public:
+    using SSD1306Wire::SSD1306Wire;
+
+    bool connect() override
+    {
+        const bool ok = SSD1306Wire::connect();
+#if defined(ARCH_NRF52) && ALMEMO_I2C_FREQUENCY_REG
+        NRF_TWIM0->FREQUENCY = ALMEMO_I2C_FREQUENCY_REG;
 #endif
+        return ok;
+    }
+};
 
 class AlmemoOledThread : public concurrency::OSThread
 {
@@ -109,13 +127,13 @@ class AlmemoOledThread : public concurrency::OSThread
         display.setFont(ArialMT_Plain_10);
 
 #if defined(ARCH_NRF52) && ALMEMO_I2C_FREQUENCY_REG
-        /* ZWINGEND NACH display.init(): SSD1306Wire::connect() ruft Wire.begin(),
-         * und das setzt FREQUENCY wieder auf K100 (Wire_nRF52.cpp). Danach ruft
-         * niemand mehr begin() -- initI2cIfNeccesary() haengt an _doI2cAutoInit,
-         * und das ist false. */
-        NRF_TWIM0->FREQUENCY = ALMEMO_I2C_FREQUENCY_REG;
-        LOG_INFO("AlmemoOled: I2C FREQUENCY=0x%08lx (~%lu Hz)", (unsigned long)ALMEMO_I2C_FREQUENCY_REG,
-                 (unsigned long)((uint64_t)ALMEMO_I2C_FREQUENCY_REG * 16000000ULL >> 32));
+        /* Gesetzt hat den Takt schon der connect()-Haken in AlmemoSSD1306, also
+         * noch vor der Init-Sequenz. Hier nur die Bestaetigung ins Log — und
+         * bewusst der tatsaechliche Registerinhalt statt des Defines, damit im
+         * Boot-Log steht, was wirklich eingestellt ist. */
+        const uint32_t freqReg = NRF_TWIM0->FREQUENCY;
+        LOG_INFO("AlmemoOled: I2C FREQUENCY=0x%08lx (~%lu Hz)", (unsigned long)freqReg,
+                 (unsigned long)((uint64_t)freqReg * 16000000ULL >> 32));
 #endif
 
         button.setPressMs(ALMEMO_OLED_LONGPRESS_MS);
@@ -133,6 +151,9 @@ class AlmemoOledThread : public concurrency::OSThread
 
     int32_t runOnce() override
     {
+        /* Bustakt zurueckholen, falls ein Fremdtreiber Wire.begin() gerufen hat. */
+        almemoI2cClockGuard();
+
         button.tick();
 
         const uint32_t now = millis();
@@ -206,8 +227,8 @@ class AlmemoOledThread : public concurrency::OSThread
         MenuRenderer::render(display, *s, local.values(), state);
     }
 
-    SSD1306Wire display{ALMEMO_OLED_ADDR, -1, -1, GEOMETRY_128_64, I2C_ONE, /* frequency */ -1};
-    OneButton   button{ALMEMO_BUTTON_PIN, /* activeLow */ true, /* pullupActive */ true};
+    AlmemoSSD1306 display{ALMEMO_OLED_ADDR, -1, -1, GEOMETRY_128_64, I2C_ONE, /* frequency */ -1};
+    OneButton     button{ALMEMO_BUTTON_PIN, /* activeLow */ true, /* pullupActive */ true};
 
     AlmemoMenuLocal local;
     MenuState       state;
