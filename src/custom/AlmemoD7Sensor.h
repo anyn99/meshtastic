@@ -148,6 +148,15 @@ class AlmemoD7Sensor
     /** Anzahl der beim Setup erkannten aktiven Messkanäle (0..MAX_SLOTS). */
     uint8_t numSlots() const { return slotCount; }
 
+    /**
+     * Typbezeichnung aus dem Textfeld t0, z.B. "ZPD700-FS". Leer, solange
+     * runSetup() nicht gelaufen ist oder t0 nicht geantwortet hat.
+     */
+    const char *deviceName() const { return devIdent; }
+
+    /** Firmware-Stand aus t0, z.B. "7.26"; leer wenn t0 keinen enthielt. */
+    const char *deviceVersion() const { return devVersion; }
+
     /** Metadaten (valueIndex/Einheit/Exponent) des i-ten aktiven Kanals; i < numSlots(). */
     const AlmemoSlot &slot(uint8_t i) const { return slots[i]; }
 
@@ -205,7 +214,10 @@ class AlmemoD7Sensor
     uint8_t    fFormat = 0; /* zuletzt per f<mode> gesetztes Ausgabeformat */
     AlmemoSlot slots[MAX_SLOTS]{};
     uint8_t    slotCount = 0;
-    char       deviceName[24]{}; /* Typ/Firmware aus t0 (für Logs) */
+    /* t0 liefert Typ und Firmware in EINEM Feld ("ZPD700-FS 7.26");
+     * runSetup() trennt das in diese zwei Puffer. */
+    char       devIdent[24]{};
+    char       devVersion[12]{};
 
     void runSetup();
 

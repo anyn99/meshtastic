@@ -98,6 +98,27 @@ void AlmemoD7Sensor::beginUart(Stream &serial)
     runSetup();
 }
 
+/*
+ * t0 liefert Typ und Firmware in EINEM Feld, z.B. "ZPD700-FS 7.26". Getrennt
+ * wird an der Zeichenfolge "7.": der D7 fuehrt immer eine Firmware 7.x (so vom
+ * Geraet bestaetigt). Sollte irgendwann eine 8.x auftauchen, ist das hier die
+ * Stelle, die angepasst werden muss.
+ */
+static void splitIdent(char *ident, char *version, size_t versionCap)
+{
+    version[0] = '\0';
+
+    char *v = strstr(ident, "7.");
+    if (!v || v == ident)
+        return; /* Muster passt nicht -> alles bleibt Kennung */
+
+    snprintf(version, versionCap, "%s", v);
+    *v = '\0';
+    /* Kennung hinten trimmen, das Leerzeichen vor der Version faellt damit weg. */
+    for (size_t n = strlen(ident); n > 0 && ident[n - 1] == ' '; n--)
+        ident[n - 1] = '\0';
+}
+
 void AlmemoD7Sensor::runSetup()
 {
     if (!uart)
@@ -109,8 +130,10 @@ void AlmemoD7Sensor::runSetup()
 
     cmdHandshake(); // G-01
 
-    if (cmdReadText(0, deviceName, sizeof(deviceName))) // t0 → Typ/Firmware
-        LOG_INFO("AlmemoD7: %s", deviceName);
+    if (cmdReadText(0, devIdent, sizeof(devIdent))) { // t0 → Typ/Firmware
+        splitIdent(devIdent, devVersion, sizeof(devVersion));
+        LOG_INFO("AlmemoD7: Typ='%s' Version='%s'", devIdent, devVersion);
+    }
 
     cmdSetFormat(4);                   // f4 (Momentanwerte aktiv)
     cmdSetParam('k', 0);               // k0

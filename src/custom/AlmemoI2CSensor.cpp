@@ -2,6 +2,8 @@
 
 #include "configuration.h"
 
+#include <string.h>
+
 namespace
 {
 /* Bekannte ALMEMO-Sensortypen (Byte an Offset 0 des EEPROM-Slots). Nur diese
@@ -12,6 +14,22 @@ constexpr uint8_t KNOWN_SENSOR_TYPES[] = {
     0x37, // digital
     0x09, // analog (NTC)
 };
+
+/* ALMEMO fuellt die EEPROM-Textfelder mit Leerzeichen auf, und zwar je Feld
+ * unterschiedlich: der Name hinten ("FHAD46  "), die Version vorne ("   6.66").
+ * Deshalb beide Enden trimmen -- und zwar hier im Treiber, damit jeder
+ * Verbraucher einen sauberen String bekommt und nicht jede Anzeige erneut
+ * trimmen muss. */
+void trimSpaces(char *s)
+{
+    char *a = s;
+    while (*a == ' ')
+        a++;
+    if (a != s)
+        memmove(s, a, strlen(a) + 1);
+    for (size_t n = strlen(s); n > 0 && s[n - 1] == ' '; n--)
+        s[n - 1] = '\0';
+}
 } // namespace
 
 bool AlmemoI2CSensor::probe(TwoWire &wire)
@@ -91,10 +109,14 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
 
     uint8_t buf[SLOT_SIZE];
 
-    if (readMem(EEPROM_ADDR, 0x00, (uint8_t *)name, 8))
+    if (readMem(EEPROM_ADDR, 0x00, (uint8_t *)name, 8)) {
         name[8] = '\0';
-    if (readMem(EEPROM_ADDR, 0xF8, (uint8_t *)version, 8))
+        trimSpaces(name);
+    }
+    if (readMem(EEPROM_ADDR, 0xF8, (uint8_t *)version, 8)) {
         version[8] = '\0';
+        trimSpaces(version);
+    }
 
     static constexpr uint8_t SLOT_BASE[MAX_SLOTS] = {0x08, 0x44, 0x80, 0xBC};
 
