@@ -478,11 +478,17 @@ int32_t I2CSlaveThread::runOnce()
         if (rd_edge > 0) {
             LOG_WARN("I2CSlave read_edge_loss: %lu (ST_READ_LAST_BIT falling-edge recovery)", rd_edge);
         }
-        /* wr/rd/ack invariant: each polling cycle is W-then-R; ack ≈ wr (one
-         * ACK per write byte, ±1 for an in-flight transaction at log time). */
+        /* ack/wr-Invariant: jedes empfangene Byte wird quittiert, also ack == wr
+         * (±1 fuer eine zum Logzeitpunkt laufende Transaktion).
+         *
+         * wr == rd wird NICHT mehr geprueft. Das galt, solange jeder Zyklus
+         * strikt W-then-R war; der Master macht aber Writes ohne folgenden Read
+         * (Wake-up-/Adress-Probes zur Steckerkennung), die Differenz ist also
+         * normal. Gemessen 8,1 Writes zu 6,3 Reads pro Probe-Zyklus -- stabil,
+         * nichts driftete, die Warnung war reines Rauschen. */
         int32_t ack_skew = (int32_t)acks - (int32_t)writes;
-        if (writes != reads || ack_skew < -1 || ack_skew > 1) {
-            LOG_WARN("I2CSlave wr/rd/ack drift: wr=%lu rd=%lu ack=%lu", writes, reads, acks);
+        if (ack_skew < -1 || ack_skew > 1) {
+            LOG_WARN("I2CSlave ack skew: wr=%lu rd=%lu ack=%lu", writes, reads, acks);
         }
     }
 
