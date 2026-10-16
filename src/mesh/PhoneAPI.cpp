@@ -252,7 +252,14 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         // If the user has specified they don't want our node to share its location, make sure to tell the phone
         // app not to send locations on our behalf.
         fromRadioScratch.which_payload_variant = meshtastic_FromRadio_my_info_tag;
-        strncpy(myNodeInfo.pio_env, optstr(APP_ENV), sizeof(myNodeInfo.pio_env));
+        // Lokaler Fix (Upstream-Datei): strncpy terminiert NICHT, wenn die Quelle
+        // laenger ist als das Ziel. pio_env ist char[40]; ein Env-Name ab 40 Zeichen
+        // hinterliess hier einen nicht terminierten String, woran nanopb das GANZE
+        // my_info-Paket abgelehnt hat ("Panic: can't encode protobuf reason=
+        // 'unterminated string'"). Die Firmware ueberspringt das Paket dann, und
+        // jeder Client haengt in waitForConfig(), weil my_info Pflicht ist.
+        strncpy(myNodeInfo.pio_env, optstr(APP_ENV), sizeof(myNodeInfo.pio_env) - 1);
+        myNodeInfo.pio_env[sizeof(myNodeInfo.pio_env) - 1] = '\0';
         myNodeInfo.nodedb_count = static_cast<uint16_t>(nodeDB->getNumMeshNodes());
         fromRadioScratch.my_info = myNodeInfo;
         state = STATE_SEND_UIDATA;
