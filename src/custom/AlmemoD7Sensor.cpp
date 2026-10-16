@@ -44,11 +44,33 @@ void d7LogBytes(const char *dir, const char *data, size_t len)
 
 bool AlmemoD7Sensor::probe_I2C(TwoWire &wire)
 {
-    /* Wake-up: der ALMEMO verlangt teils mehrere Adress-Writes, bevor er ackt
+    /* Wake-up: der ALMEMO verlangt teils mehrere Zugriffe, bevor er ackt
      * (bis zu 3 Versuche, passend zum mitgeschnittenen Handshake). */
+    /*
+     * EXPERIMENT (2026-10-16): der Wake-up schickt ein Registerbyte mit, statt
+     * nur die Adresse. Grund ist NICHT die Form des Zugriffs -- ein ALMEMO-
+     * Logger macht genauso "write to 0x50" + ACK ohne Datenbyte, regelmaessig
+     * zur Steckerkennung, und unser Bitbang-Slave im Receiver vertraegt das
+     * dort problemlos.
+     *
+     * Der Unterschied ist das TIMING des STOP: bei MAXCNT=0 ueberspringt
+     * Wire_nRF52::endTransmission() das Warten auf LASTTX und stoesst
+     * TASKS_STOP sofort an. Der STOP landet dadurch deutlich dichter hinter dem
+     * ACK als bei einem konventionellen Master. Der Slave bleibt daraufhin in
+     * ST_WRITE_RX haengen und wird taub -- keine GPIOTE-Events mehr, also
+     * greift auch sein In-ISR-Timeout nicht.
+     *
+     * Mit einem Datenbyte laeuft die Transaktion den normalen Weg (LASTTX ->
+     * STOP) und das Fenster ist wieder so breit wie gewohnt. Bestaetigt sich
+     * das, ist die Ursache eingegrenzt -- und es bleibt die Entscheidung, ob
+     * der Slave zusaetzlich gehaertet wird, damit er auch die enge Variante
+     * uebersteht. Das geschriebene Byte ist der Registerzeiger, der ohnehin
+     * als naechstes gebraucht wird.
+     */
     bool acked = false;
     for (uint8_t attempt = 0; attempt < 3; attempt++) {
         wire.beginTransmission(I2C_ADDR);
+        wire.write(REG_TYPE); /* Registerzeiger statt Null-Byte-Write */
         if (wire.endTransmission() == 0) {
             acked = true;
             break;
