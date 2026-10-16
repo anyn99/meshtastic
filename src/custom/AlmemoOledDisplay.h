@@ -7,6 +7,7 @@
 #include "AlmemoI2CClock.h"
 #include "AlmemoMenu.h"
 #include "AlmemoMenuLocal.h"
+#include "AlmemoMenuRenderer.h"
 #include "concurrency/OSThread.h"
 
 #include <OneButton.h>
