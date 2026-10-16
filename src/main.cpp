@@ -556,6 +556,27 @@ void setup()
     // We need to scan here to decide if we have a screen for nodeDB.init() and because power has been applied to
     // accessories
     auto i2cScanner = std::unique_ptr<ScanI2CTwoWire>(new ScanI2CTwoWire());
+#if defined(ALMEMO_OLED)
+    /* KEIN Boot-Scan auf dieser Variante.
+     *
+     * Der Scan probt 0x08..0x77 mit Adresse-only-Writes, und zwar zwangsweise
+     * mit 100 kHz: Wire.begin() setzt FREQUENCY auf K100, und der 50-kHz-Haken
+     * greift erst, wenn AlmemoOledThread existiert (rund 500 Zeilen weiter
+     * unten, s. AlmemoI2CClock.h). Auf 0x50/0x51 sitzt aber der aufgesteckte
+     * ALMEMO-Receiver, dessen Bitbang-Slave bei 100 kHz nur zu 6 % antwortet
+     * (in I2C-Mitschnitten gemessen) -- der Scan bringt ihn aus dem Tritt.
+     *
+     * Sein Ergebnis braucht hier ohnehin niemand: MESHTASTIC_EXCLUDE_SCREEN
+     * setzt HAS_SCREEN auf 0, das Display gehoert AlmemoOledThread; RTC,
+     * Keyboard, PMU und Beschleunigungssensor gibt es auf dem XIAO nicht; und
+     * ALMEMO, Mux und SHT erkennt AlmemoSenderThread selbst, mit unserem
+     * Bustakt. Uebrig bliebe die Telemetrie-Erkennung -- die hat hier schon
+     * INA219 und FHAD46 gemeldet, die es nicht gibt. Spart Startzeit.
+     *
+     * Die Zeile "No I2C devices found" unten ist die Folge davon, nicht das
+     * Ergebnis einer Messung. */
+    LOG_INFO("Skip i2c scan (ALMEMO verwaltet den Bus selbst)");
+#else
 #if HAS_WIRE
     LOG_INFO("Scan for i2c devices");
 #endif
@@ -574,6 +595,7 @@ void setup()
 #elif HAS_WIRE
     i2cScanner->scanPort(ScanI2C::I2CPort::WIRE);
 #endif
+#endif // ALMEMO_OLED
 
     auto i2cCount = i2cScanner->countDevices();
     if (i2cCount == 0) {
