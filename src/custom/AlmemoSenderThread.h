@@ -507,8 +507,9 @@ class AlmemoSenderThread : public concurrency::OSThread
             info.channels = 2;
             break;
         case SRC_ALMEMO_D7:
-            /* Geraetename/-version sind im D7-Treiber noch privat -> offener Punkt. */
             info.typeByte    = ALMEMO_TYPE_D7;
+            info.name        = d7.deviceName();
+            info.version     = d7.deviceVersion();
             info.channels    = d7.numSlots();
             info.channelsMax = AlmemoD7Sensor::MAX_SLOTS;
             break;

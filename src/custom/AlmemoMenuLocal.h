@@ -9,6 +9,7 @@
 #include "DisplayFormatters.h"
 #include "NodeDB.h"
 #include "PowerStatus.h"
+#include "power/PowerHAL.h"
 #include "airtime.h"
 
 /*
@@ -129,9 +130,11 @@ class AlmemoMenuLocal
         for (uint8_t i = n; i < MAX_MEAS; i++)
             vals[VAL_MEAS0 + i].kind = (uint8_t)MenuValueKind::Invalid;
 
-        vals[VAL_PACKETS].raw = (int32_t)sendCount;
-        pushedIntervalSecs    = intervalSecs; /* ueberlebt rebuild(), siehe poll() */
-        lastSendMs            = millis();
+        /* Beides ueberlebt rebuild() absichtlich als Member: clear() nullt die
+         * Werte, und der Paketzaehler darf beim Sensorverlust nicht auf 0 fallen. */
+        lastPackets        = sendCount;
+        pushedIntervalSecs = intervalSecs;
+        lastSendMs         = millis();
         poll();
     }
 
@@ -161,6 +164,10 @@ class AlmemoMenuLocal
             setFixed(VAL_AIRUTIL, (int32_t)(airTime->utilizationTXPercent() * 10.0f), -1);
         }
 
+        /* Paketzaehler aus dem Member, nicht aus dem genullten Wertearray. */
+        vals[VAL_PACKETS].kind = (uint8_t)MenuValueKind::Int;
+        vals[VAL_PACKETS].raw  = (int32_t)lastPackets;
+
         vals[VAL_SINCE].raw  = lastSendMs ? (int32_t)((millis() - lastSendMs) / 1000) : 0;
         vals[VAL_SINCE].kind = lastSendMs ? (uint8_t)MenuValueKind::Int : (uint8_t)MenuValueKind::Invalid;
 
@@ -189,8 +196,11 @@ class AlmemoMenuLocal
             vals[VAL_NEXT].kind = (uint8_t)MenuValueKind::Invalid;
         }
 
-        /* Akku: bei USB-Versorgung Text statt Spannung (Einheit wird dann nicht angehaengt). */
-        if (powerStatus && powerStatus->getHasUSB()) {
+        /* Akku: bei USB-Versorgung Text statt Spannung (die Einheit wird dann nicht
+         * angehaengt). Erkannt wird das wie beim Stromsparen des Senders ueber
+         * powerHAL_isVBUSConnected() -- powerStatus->getHasUSB() war hier
+         * unzuverlaessig und zeigte weiter mV. */
+        if (powerHAL_isVBUSConnected()) {
             vals[VAL_BATT].kind = (uint8_t)MenuValueKind::Text;
             vals[VAL_BATT].text = offUsb;
         } else if (powerStatus) {
@@ -241,6 +251,7 @@ class AlmemoMenuLocal
     uint32_t   lastFingerprint = 0;
     uint32_t   lastSendMs      = 0;
     uint32_t   pushedIntervalSecs = 0; /* 0 = noch nichts gesendet */
+    uint32_t   lastPackets        = 0; /* ueberlebt rebuild() */
 
     uint8_t  itemInterval = MENU_NO_IDX;
     uint8_t  itemPreset   = MENU_NO_IDX;
@@ -390,7 +401,7 @@ class AlmemoMenuLocal
                 if (i > n)
                     break;
                 if (i == n) { /* letzte Zeile hinter dem letzten Kanal */
-                    b.item("Nächste in", VAL_NEXT, "s");
+                    b.item("Aktualisierung in", VAL_NEXT, "s");
                     break;
                 }
                 char lbl[10], unit[4];
