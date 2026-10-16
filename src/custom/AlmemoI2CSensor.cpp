@@ -176,21 +176,16 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
         }
     }
 
-    /* Nur loggen, wenn sich das Ergebnis geaendert hat: begin() laeuft in
-     * mehreren Pfaden wiederholt durch -- im Probe-Intervall alle 500 ms,
-     * solange nichts erkannt ist, und bei SRC_ALMEMO_MULTI ueber refreshMux()
-     * in jedem Sendezyklus einmal pro Kanal. Ohne Gate flutet das das Log; das
-     * fiel erst auf, als der Bus zuverlaessig auf 50 kHz blieb und das Geraet
-     * dadurch jedes Mal antwortete. */
-    uint32_t fp = slotCount + 1u;
-    for (const char *p = name; *p; p++)
-        fp = fp * 31u + (uint8_t)*p;
-    for (const char *p = version; *p; p++)
-        fp = fp * 31u + (uint8_t)*p;
-    if (fp != lastLogFp) {
-        lastLogFp = fp;
-        LOG_INFO("AlmemoI2C: name='%s' ver='%s' slots=%u", name, version, slotCount);
-    }
+    /* Bewusst JEDES Mal: die Zeile soll beim An- und Abstecken erscheinen.
+     *
+     * Hier stand kurzzeitig ein Gate auf Aenderungen, weil begin() bei 0 Slots
+     * scheiterte und deshalb im 500-ms-Probe-Intervall endlos durchlief. Seit
+     * Nullslot-Geraete akzeptiert werden, wird die Quelle gesetzt und
+     * probeSensors() hoert auf -- der Grund ist also weg.
+     *
+     * Bleibt eine laute Stelle: bei SRC_ALMEMO_MULTI ruft refreshMux() begin()
+     * in jedem Sendezyklus pro Kanal. Das war aber auch vorher so. */
+    LOG_INFO("AlmemoI2C: name='%s' ver='%s' slots=%u", name, version, slotCount);
     /* Das Geraet gilt als erkannt, sobald 0x50 ackt -- AUCH ohne einen
      * einzigen belegten Slot. Ein Fuehler ohne initialisierte Messstellen (etwa
      * unser Receiver, bevor sein Sensor eingerichtet ist) ist dann eben ein
