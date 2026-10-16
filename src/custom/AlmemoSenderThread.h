@@ -10,6 +10,9 @@
 #if defined(ALMEMO_EINK)
 #include "AlmemoEinkDisplay.h"
 #endif
+#if defined(ALMEMO_OLED)
+#include "AlmemoOledDisplay.h"
+#endif
 #include "Default.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -47,7 +50,12 @@ extern "C" {
 #define ALMEMO_CHANNEL_INDEX 1
 #endif
 
-#if defined(ALMEMO_EINK)
+// E-Paper und OLED teilen sich alles, was nicht panel-spezifisch ist (Sendezähler).
+#if defined(ALMEMO_EINK) || defined(ALMEMO_OLED)
+#define ALMEMO_HAS_DISPLAY 1
+#endif
+
+#if defined(ALMEMO_HAS_DISPLAY)
 // Persistenter Sendezähler über Warmstarts hinweg. Der getimte Deep-Sleep ist in Wahrheit
 // delay()+NVIC_SystemReset() (ein Warmstart, bei dem das SRAM erhalten bleibt); nur ein
 // echter Power-Cycle löscht es. Die Variable liegt in .noinit (vom Startup NICHT genullt,
@@ -463,9 +471,54 @@ class AlmemoSenderThread : public concurrency::OSThread
         }
     }
 
+#endif // ALMEMO_EINK
+
+#if defined(ALMEMO_OLED)
+    /** Infos zur aktiven Quelle fuer die Sensor-Seite des Menues. */
+    void fillMenuInfo(AlmemoMenuSensorInfo &info) const
+    {
+        info.source = sourceName(source);
+        info.status = 0; /* OK */
+        switch (source) {
+        case SRC_ALMEMO:
+            info.connection = "I2C 0x50";
+            info.name       = almemo.deviceName();
+            info.version    = almemo.deviceVersion();
+            info.channels   = almemo.numSlots();
+            break;
+        case SRC_ALMEMO_MULTI:
+            info.connection = "I2C Mux 0x70";
+            for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++)
+                if (muxPresent[ch])
+                    info.channels = (uint8_t)(info.channels + almemoMux[ch].numSlots());
+            break;
+        case SRC_SHT:
+            info.connection = "I2C 0x44";
+            info.channels   = 2;
+            break;
+        case SRC_EMULATOR:
+            info.connection = "Emulator";
+            info.channels   = 2;
+            break;
+        case SRC_ALMEMO_D7:
+            /* Geraetename/-version sind im D7-Treiber noch privat -> offener Punkt. */
+            info.connection = "UART D6/D7";
+            info.channels   = d7.numSlots();
+            break;
+        default:
+            info.connection = "-";
+            info.status     = 1; /* kein Sensor */
+            break;
+        }
+    }
+#endif
+
+#if defined(ALMEMO_HAS_DISPLAY)
     // Sendezähler-Stand des letzten gesendeten Pakets (für Display-Updates ohne neues Senden).
     uint32_t lastSendCount = 0;
+#endif
 
+#if defined(ALMEMO_EINK)
     /** E-Paper mit dem aktuellen Sensor-/Sendestand neu zeichnen. */
     void publishEinkNow(uint32_t sendCount)
     {
@@ -536,6 +589,9 @@ class AlmemoSenderThread : public concurrency::OSThread
 #if defined(ALMEMO_EINK)
                 publishEinkNow(lastSendCount); // leeres Display, Zähler unverändert
 #endif
+#if defined(ALMEMO_OLED)
+                almemoOledClear(); // Werte verwerfen, Zähler unverändert
+#endif
                 return ALMEMO_SENDER_PROBE_INTERVAL_MS;
             }
         }
@@ -554,6 +610,9 @@ class AlmemoSenderThread : public concurrency::OSThread
                     almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
 #if defined(ALMEMO_EINK)
                 publishEinkNow(lastSendCount); // Sensor weg -> Display leeren, Zähler unverändert
+#endif
+#if defined(ALMEMO_OLED)
+                almemoOledClear(); // Sensor weg -> Werte verwerfen, Zähler unverändert
 #endif
             } else {
                 LOG_WARN("AlmemoSender: sensor read error (invalid value)");
@@ -586,11 +645,22 @@ class AlmemoSenderThread : public concurrency::OSThread
 
         LOG_DEBUG("AlmemoSender [%s] %u value(s), %u bytes sent", sourceName(source), pkt.count, (unsigned)wireSize);
 
-#if defined(ALMEMO_EINK)
-        // E-Paper mit Intervall + Sendezähler + den 4 Sensor-Infos (Name/Wertanzahl) versorgen.
+#if defined(ALMEMO_HAS_DISPLAY)
         // Der Zähler überlebt die Deep-Sleep-Warmstarts (.noinit) und wird nur hier hochgezählt.
         lastSendCount = almemoNextSendCount();
+#endif
+#if defined(ALMEMO_EINK)
+        // E-Paper: Intervall + Sendezähler + die 4 Sensor-Infos (Name/Wertanzahl).
         publishEinkNow(lastSendCount);
+#endif
+#if defined(ALMEMO_OLED)
+        // OLED: Messwerte aus dem gerade gesendeten Paket (trägt Einheit/Exponent/Rohwert
+        // mit) plus die Infos zur aktiven Quelle fuer die Sensor-Seite.
+        {
+            AlmemoMenuSensorInfo menuInfo;
+            fillMenuInfo(menuInfo);
+            almemoOledPublish(pkt, menuInfo, lastSendCount, intervalMs() / 1000);
+        }
 #endif
 
         if (sensorPowerSaving()) {

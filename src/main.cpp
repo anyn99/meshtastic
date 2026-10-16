@@ -21,6 +21,9 @@ static AlmemoSenderThread *almemoSenderThread;
 #if defined(ALMEMO_EINK)
 #include "custom/AlmemoEinkDisplay.h"
 #endif
+#if defined(ALMEMO_OLED)
+#include "custom/AlmemoOledDisplay.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
@@ -1053,6 +1056,11 @@ void setup()
 #endif
 #if defined(ALMEMO_SENSOR_SENDER)
     almemoLedThread = new AlmemoLedThread();
+#if defined(ALMEMO_OLED)
+    // Vor dem Sender anlegen, damit die Anzeige beim ersten publish() schon steht.
+    // Wire ist hier langst initialisiert -> SSD1306Wire::connect() findet den Bus vor.
+    almemoOledThread = new AlmemoOledThread();
+#endif
     almemoSenderThread = new AlmemoSenderThread();
 #endif
 
