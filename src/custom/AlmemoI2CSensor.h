@@ -74,6 +74,8 @@ class AlmemoI2CSensor
     const AlmemoSlot &slot(uint8_t i) const { return slots[i]; }
     const char       *deviceName() const { return name; }
     const char       *deviceVersion() const { return version; }
+    /** Kennungsbyte des ersten belegten Slots (ALMEMO_TYPE_*). */
+    uint8_t           deviceType() const { return typeByte; }
 
   private:
     TwoWire   *wire = nullptr;
@@ -81,6 +83,7 @@ class AlmemoI2CSensor
     uint8_t    slotCount = 0;
     char       name[9]{};
     char       version[9]{};
+    uint8_t    typeByte = ALMEMO_TYPE_NONE;
 
     bool readMem(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len);
     /* Block eines EEPROM-Slots dekodieren; bei bekanntem Typ out füllen und true. */

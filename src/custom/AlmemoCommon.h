@@ -65,6 +65,20 @@ struct __attribute__((packed)) AlmemoSensorPacket {
 };
 
 // =========================================================================
+//  ALMEMO-Kennungsbyte eines Fuehlers
+// =========================================================================
+
+/* Byte an Offset 0 eines EEPROM-Slots bzw. an 0x50/Reg 0x08. ALMEMO_TYPE_I2C ist
+ * KEINE ALMEMO-Kennung, sondern markiert einen Sensor, der direkt am I2C haengt
+ * (z.B. SHT) und damit gar kein ALMEMO-EEPROM hat. */
+#define ALMEMO_TYPE_NONE   0xFF /* nichts gesteckt / leerer Slot */
+#define ALMEMO_TYPE_ANALOG 0x09 /* analog (NTC) */
+#define ALMEMO_TYPE_D6     0x37 /* digital */
+#define ALMEMO_TYPE_D7     0x7B /* ALMEMO D7 */
+#define ALMEMO_TYPE_I2C    0x00 /* Sensor direkt am I2C, kein ALMEMO-EEPROM */
+#define ALMEMO_TYPE_EMU    0x01 /* emulierte Werte, gar keine Hardware */
+
+// =========================================================================
 //  Messwert-Slot, wie ihn ein Treiber liefert (von beiden Treibern direkt genutzt)
 // =========================================================================
 

@@ -82,6 +82,7 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
 {
     wire      = &w;
     slotCount = 0;
+    typeByte  = ALMEMO_TYPE_NONE;
 
     if (!probe(*wire)) {
         //LOG_DEBUG("AlmemoI2C: no ACK @0x%02x", EEPROM_ADDR);
@@ -104,6 +105,9 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
             continue;
         AlmemoSlot s;
         if (parseSlot(hw, buf, s)) {
+            /* Kennung des ersten belegten Slots merken — kennzeichnet den Fuehler. */
+            if (typeByte == ALMEMO_TYPE_NONE)
+                typeByte = buf[0];
             slots[slotCount++] = s;
             LOG_INFO("AlmemoI2C: slot %u (hw %u) exp=%d unit='%s'", slotCount - 1, hw, s.exponent, s.unit);
         }
