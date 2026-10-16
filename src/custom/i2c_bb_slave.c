@@ -764,6 +764,36 @@ bool i2c_bb_slave_is_idle(void)
     return s_state == ST_IDLE;
 }
 
+void i2c_bb_slave_reset(void)
+{
+    NVIC_DisableIRQ(GPIOTE_IRQn);
+
+    reset_to_idle();
+
+    /*
+     * Wie in i2c_bb_slave_init(): aus den TATSAECHLICHEN Pegeln neu bewaffnen.
+     * reset_to_idle() bewaffnet SDA blind auf SENSE_LOW -- liegt SDA gerade schon
+     * LOW, setzt die Hardware den LATCH sofort und pin_sense_set() loescht ihn
+     * mit, womit wir direkt wieder taub waeren.
+     */
+    s_scl_last = scl_read();
+    s_sda_last = sda_read();
+    sda_sense_arm(s_sda_last);
+    scl_sense_arm(s_scl_last);
+
+    /* Stale LATCH-Bits und EVENTS_PORT raeumen, sonst feuert der erste IRQ
+     * sofort ohne echte Flanke (siehe Kommentar in init()). */
+    _PIN_PORT(I2C_BB_SDA_PIN)->LATCH = (1u << _PIN_BIT(I2C_BB_SDA_PIN));
+    _PIN_PORT(I2C_BB_SCL_PIN)->LATCH = (1u << _PIN_BIT(I2C_BB_SCL_PIN));
+    NRF_GPIOTE->EVENTS_PORT          = 0;
+
+    s_last_state_change_cyc = DWT->CYCCNT;
+    i2c_bb_slave_stats.resets++;
+
+    NVIC_ClearPendingIRQ(GPIOTE_IRQn);
+    NVIC_EnableIRQ(GPIOTE_IRQn);
+}
+
 void i2c_bb_slave_get_debug(uint8_t *bit_cnt, uint8_t *rx_len, uint8_t *tx_idx)
 {
     if (bit_cnt) *bit_cnt = s_bit_cnt;

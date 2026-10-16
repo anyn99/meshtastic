@@ -509,6 +509,17 @@ int32_t I2CSlaveThread::runOnce()
                  (long)(millis() - stuckSinceMs),
                  bit_cnt, rx_len, tx_idx,
                  (unsigned long)irq_delta);
+
+        /* Selbstheilung. Der In-ISR-Timeout kann hier nichts machen: er braucht
+         * einen GPIOTE-Event, und bei irq_delta == 0 kommen genau die nicht mehr.
+         * Beobachtet mit unserem Node als Master -- dessen TWIM stoesst bei einem
+         * Write ohne Datenbyte (MAXCNT=0) den STOP ohne LASTTX-Warten an, der
+         * landet also sehr dicht hinter dem ACK und eine Flanke geht verloren.
+         * Am ALMEMO-Logger tritt der Fall nicht auf. */
+        i2c_bb_slave_reset();
+        LOG_INFO("I2CSlave: reset nach Haenger (resets=%lu)", (unsigned long)i2c_bb_slave_stats.resets);
+        stuckSinceMs    = 0; /* Erkennung neu starten */
+        stuckIrqAtStart = 0;
     }
 
     /* While muted, schedule the next wakeup tightly on the deadline so the

@@ -103,6 +103,7 @@ typedef struct {
     volatile uint8_t  irq_dur_idx;                      /**< Next write index (wraps at I2C_BB_IRQ_DUR_LOG). */
     volatile uint32_t scl_periods[I2C_BB_SCL_PERIOD_LOG]; /**< DWT ticks between SCL rising edges. */
     volatile uint8_t  scl_period_idx;                      /**< Next write index (wraps at I2C_BB_SCL_PERIOD_LOG). */
+    uint32_t resets;        /**< Resets aus dem Task-Kontext nach Haenger. */
 } i2c_bb_slave_stats_t;
 
 extern volatile i2c_bb_slave_stats_t i2c_bb_slave_stats;
@@ -127,6 +128,24 @@ void i2c_bb_slave_unregister(uint8_t addr);
 
 /** Returns true when the state machine is in its idle (between transactions) state. */
 bool i2c_bb_slave_is_idle(void);
+
+/**
+ * Zustandsmaschine zwangsweise auf IDLE und SENSE aus den TATSAECHLICHEN
+ * Pin-Pegeln neu bewaffnen. Fuer die Selbstheilung aus dem Task-Kontext.
+ *
+ * Noetig, weil der In-ISR-Timeout in genau dem interessanten Fall nicht
+ * greifen kann: er braucht einen GPIOTE-Event, und genau die kommen nicht
+ * mehr (irq_delta == 0). Ursache ist eine verlorene Flanke -- pin_sense_set()
+ * loescht den LATCH nach dem Bewaffnen, und wechselt der Pin genau in diesem
+ * Fenster, ist das Event weg und die SENSE auf einen Pegel bewaffnet, den der
+ * Pin schon hat.
+ *
+ * Maskiert den GPIOTE-Interrupt, solange am Zustand gearbeitet wird.
+ * Angefangene Empfangsdaten werden NICHT committet: ein haengengebliebener
+ * Transfer ist unvollstaendig, und der Reset soll keinen neuen Aufrufpfad in
+ * die Callbacks aufmachen.
+ */
+void i2c_bb_slave_reset(void);
 
 /** Returns a static string naming the current state-machine state ("ST_IDLE", "ST_READ_TX", ...). */
 const char *i2c_bb_slave_state_name(void);
