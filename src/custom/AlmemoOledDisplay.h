@@ -11,6 +11,10 @@
 #include <OneButton.h>
 #include <SSD1306Wire.h>
 
+#if defined(ARCH_NRF52)
+#include <nrf.h>
+#endif
+
 /*
  * AlmemoOledDisplay — Hardware-Schale um das generische Menue.
  *
@@ -72,6 +76,25 @@
 #define ALMEMO_OLED_FLIP 1
 #endif
 
+/*
+ * Roh-Wert fuer NRF_TWIM0->FREQUENCY (Wire haengt auf TWIM0).
+ *
+ * Der ALMEMO-Logger faehrt den Bus mit 50 kHz, und der Bitbang-Slave des
+ * Receivers ist darauf ausgelegt. Ueber die Arduino-API ist das nicht
+ * erreichbar: Wire_nRF52::setClock() klemmt alles <= 100000 auf K100, und die
+ * TWIM kennt offiziell nur K100/K250/K400.
+ *
+ * Das Register ist aber ein Frequenz-Skalierer mit f = FREQUENCY / 2^32 * 16 MHz
+ * -- damit ergeben die dokumentierten Werte genau 100/250/400 kHz, und die
+ * Haelfte von K100 (0x01980000) liefert ~49,8 kHz. Zwischenwerte sind
+ * UNDOKUMENTIERT, funktionieren aber in der Praxis.
+ *
+ * Auf 0 setzen laesst den Bus bei den 100 kHz aus Wire.begin().
+ */
+#ifndef ALMEMO_I2C_FREQUENCY_REG
+#define ALMEMO_I2C_FREQUENCY_REG 0x00CC0000UL /* ~49,8 kHz */
+#endif
+
 class AlmemoOledThread : public concurrency::OSThread
 {
   public:
@@ -84,6 +107,16 @@ class AlmemoOledThread : public concurrency::OSThread
 #endif
         display.displayOn();
         display.setFont(ArialMT_Plain_10);
+
+#if defined(ARCH_NRF52) && ALMEMO_I2C_FREQUENCY_REG
+        /* ZWINGEND NACH display.init(): SSD1306Wire::connect() ruft Wire.begin(),
+         * und das setzt FREQUENCY wieder auf K100 (Wire_nRF52.cpp). Danach ruft
+         * niemand mehr begin() -- initI2cIfNeccesary() haengt an _doI2cAutoInit,
+         * und das ist false. */
+        NRF_TWIM0->FREQUENCY = ALMEMO_I2C_FREQUENCY_REG;
+        LOG_INFO("AlmemoOled: I2C FREQUENCY=0x%08lx (~%lu Hz)", (unsigned long)ALMEMO_I2C_FREQUENCY_REG,
+                 (unsigned long)((uint64_t)ALMEMO_I2C_FREQUENCY_REG * 16000000ULL >> 32));
+#endif
 
         button.setPressMs(ALMEMO_OLED_LONGPRESS_MS);
         button.setClickMs(250);
