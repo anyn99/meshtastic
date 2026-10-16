@@ -141,10 +141,21 @@ class AlmemoMenuLocal
     /** Sensor weg: Werte verwerfen, Struktur auf "Keine Messstellen" stellen. */
     void clear()
     {
-        AlmemoSensorPacket empty = {};
+        AlmemoSensorPacket   empty = {};
         AlmemoMenuSensorInfo info;
-        rebuild(empty, info);
-        lastFingerprint = fingerprint(empty, info);
+
+        /* Gleicher Schutz wie in publish(): steht die Struktur schon im
+         * Leer-Zustand, muss sie nicht neu gebaut werden. clear() kommt bei
+         * jedem Disconnect, und ein Rebuild zieht den kompletten Pool neu.
+         *
+         * Ueberspringen ist gefahrlos: die Leer-Struktur hat gar keine
+         * Messwert-Items, alte vals[] werden also nicht gerendert -- und wenn
+         * sie schon stand, wurden sie beim vorigen clear() ohnehin verworfen. */
+        const uint32_t fp = fingerprint(empty, info);
+        if (!built || fp != lastFingerprint) {
+            rebuild(empty, info);
+            lastFingerprint = fp;
+        }
         poll();
     }
 
