@@ -481,33 +481,40 @@ class AlmemoSenderThread : public concurrency::OSThread
         info.status = 0; /* OK */
         switch (source) {
         case SRC_ALMEMO:
-            info.connection = "I2C 0x50";
-            info.name       = almemo.deviceName();
-            info.version    = almemo.deviceVersion();
-            info.channels   = almemo.numSlots();
+            info.typeByte    = almemo.deviceType(); /* 0x37 digital, 0x09 analog */
+            info.name        = almemo.deviceName();
+            info.version     = almemo.deviceVersion();
+            info.channels    = almemo.numSlots();
+            info.channelsMax = AlmemoI2CSensor::MAX_SLOTS;
             break;
         case SRC_ALMEMO_MULTI:
-            info.connection = "I2C Mux 0x70";
+            /* Mehrere Geraete am Mux: eine sinnvolle Obergrenze gibt es nicht,
+             * daher nur die Summe ohne "/max". */
             for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++)
-                if (muxPresent[ch])
+                if (muxPresent[ch]) {
+                    if (info.typeByte == ALMEMO_TYPE_NONE)
+                        info.typeByte = almemoMux[ch].deviceType();
                     info.channels = (uint8_t)(info.channels + almemoMux[ch].numSlots());
+                }
             break;
         case SRC_SHT:
-            info.connection = "I2C 0x44";
-            info.channels   = 2;
+            info.typeByte = ALMEMO_TYPE_I2C;
+            info.i2cAddr  = ALMEMO_SHT_ADDR;
+            info.channels = 2; /* Temperatur + Feuchte */
             break;
         case SRC_EMULATOR:
-            info.connection = "Emulator";
-            info.channels   = 2;
+            info.typeByte = ALMEMO_TYPE_EMU;
+            info.channels = 2;
             break;
         case SRC_ALMEMO_D7:
             /* Geraetename/-version sind im D7-Treiber noch privat -> offener Punkt. */
-            info.connection = "UART D6/D7";
-            info.channels   = d7.numSlots();
+            info.typeByte    = ALMEMO_TYPE_D7;
+            info.channels    = d7.numSlots();
+            info.channelsMax = AlmemoD7Sensor::MAX_SLOTS;
             break;
         default:
-            info.connection = "-";
-            info.status     = 1; /* kein Sensor */
+            info.typeByte = ALMEMO_TYPE_NONE;
+            info.status   = 1; /* kein Sensor */
             break;
         }
     }

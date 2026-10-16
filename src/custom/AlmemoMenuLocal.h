@@ -25,14 +25,22 @@
  * auf den passenden Offset. Deshalb braucht ein Preset-Wechsel keinen Neubau.
  */
 
+/* Spiegelt den Default des Senders; gleicher #ifndef-Guard, also derselbe
+ * Wert auch wenn das Env ihn ueberschreibt. */
+#ifndef ALMEMO_SENDER_DEFAULT_INTERVAL_SECS
+#define ALMEMO_SENDER_DEFAULT_INTERVAL_SECS 30
+#endif
+
 /** Was der Sender ueber seine aktuelle Quelle mitteilt. */
 struct AlmemoMenuSensorInfo {
-    const char *source     = "NONE";
-    const char *connection = "";
-    const char *name       = "";
-    const char *version    = "";
-    uint8_t     channels   = 0;
-    uint8_t     status     = 1; /* Index in STATUS_TEXT */
+    const char *source      = "NONE";
+    const char *name        = "";
+    const char *version     = "";
+    uint8_t     typeByte    = ALMEMO_TYPE_NONE; /* ALMEMO-Kennung des Fuehlers */
+    uint8_t     i2cAddr     = 0;                /* nur bei ALMEMO_TYPE_I2C */
+    uint8_t     channels    = 0;                /* aktive Messkanaele */
+    uint8_t     channelsMax = 0;                /* 0 = ohne "/max" anzeigen */
+    uint8_t     status      = 1;                /* Index in STATUS_TEXT */
 };
 
 class AlmemoMenuLocal
@@ -41,7 +49,7 @@ class AlmemoMenuLocal
     /* Feste Werteplaetze — der Builder verdrahtet die Items darauf. */
     enum : uint8_t {
         VAL_MEAS0 = 0, /* 0..9: Messwerte */
-        VAL_CONN  = 10,
+        VAL_TYPE  = 10,
         VAL_IDENT,
         VAL_VER,
         VAL_CHANS,
@@ -54,9 +62,46 @@ class AlmemoMenuLocal
         VAL_FIRMWARE,
         VAL_INTERVAL,
         VAL_PRESET,
+        VAL_NEXT, /* Sekunden bis zur naechsten Aktualisierung */
         VAL_COUNT
     };
     static constexpr uint8_t MAX_MEAS = 10;
+
+    /** Fuehlertyp fuer die Sensor-Seite; bei direktem I2C-Sensor mit Adresse. */
+    static void typeText(const AlmemoMenuSensorInfo &i, char *out, size_t cap)
+    {
+        switch (i.typeByte) {
+        case ALMEMO_TYPE_ANALOG:
+            snprintf(out, cap, "ANALOG");
+            break;
+        case ALMEMO_TYPE_D6:
+            snprintf(out, cap, "D6");
+            break;
+        case ALMEMO_TYPE_D7:
+            snprintf(out, cap, "D7");
+            break;
+        case ALMEMO_TYPE_I2C:
+            snprintf(out, cap, "I2C 0x%02X", i.i2cAddr);
+            break;
+        case ALMEMO_TYPE_EMU:
+            snprintf(out, cap, "Emulator");
+            break;
+        default:
+            snprintf(out, cap, "-"); /* nichts gesteckt */
+            break;
+        }
+    }
+
+    /** Kanalzahl: "2/4" wenn es eine Slot-Obergrenze gibt, sonst nur die Anzahl. */
+    static void channelsText(const AlmemoMenuSensorInfo &i, char *out, size_t cap)
+    {
+        if (i.typeByte == ALMEMO_TYPE_NONE)
+            snprintf(out, cap, "-");
+        else if (i.channelsMax)
+            snprintf(out, cap, "%u/%u", (unsigned)i.channels, (unsigned)i.channelsMax);
+        else
+            snprintf(out, cap, "%u", (unsigned)i.channels);
+    }
 
     static constexpr const char *STATUS_TEXT[] = {"OK", "kein Sensor", "Timeout", "Überlauf"};
     static constexpr uint8_t     STATUS_COUNT  = 4;
@@ -85,8 +130,8 @@ class AlmemoMenuLocal
             vals[VAL_MEAS0 + i].kind = (uint8_t)MenuValueKind::Invalid;
 
         vals[VAL_PACKETS].raw = (int32_t)sendCount;
-        vals[VAL_INTERVAL].raw = (int32_t)intervalSecs;
-        lastSendMs             = millis();
+        pushedIntervalSecs    = intervalSecs; /* ueberlebt rebuild(), siehe poll() */
+        lastSendMs            = millis();
         poll();
     }
 
@@ -119,6 +164,31 @@ class AlmemoMenuLocal
         vals[VAL_SINCE].raw  = lastSendMs ? (int32_t)((millis() - lastSendMs) / 1000) : 0;
         vals[VAL_SINCE].kind = lastSendMs ? (uint8_t)MenuValueKind::Int : (uint8_t)MenuValueKind::Invalid;
 
+        /* Intervall: solange noch nie gesendet wurde (z.B. ohne Sensor) aus der
+         * Config ableiten, sonst stand hier 0s. 0 in der Config heisst Default.
+         * Nach dem ersten Senden gilt der vom Sender gemeldete Wert; der kann bei
+         * einer anderen Rolle als SENSOR mit der Knotenzahl skaliert sein. */
+        {
+            uint32_t iv = pushedIntervalSecs;
+            if (!iv) {
+                const uint32_t cfg = moduleConfig.telemetry.environment_update_interval;
+                iv                 = cfg ? cfg : ALMEMO_SENDER_DEFAULT_INTERVAL_SECS;
+            }
+            vals[VAL_INTERVAL].kind = (uint8_t)MenuValueKind::Duration;
+            vals[VAL_INTERVAL].raw  = (int32_t)iv;
+        }
+
+        /* Restzeit bis zur naechsten Aktualisierung; vor dem ersten Senden "----". */
+        if (lastSendMs) {
+            int32_t rest = vals[VAL_INTERVAL].raw - (int32_t)((millis() - lastSendMs) / 1000);
+            if (rest < 0)
+                rest = 0;
+            vals[VAL_NEXT].kind = (uint8_t)MenuValueKind::Int;
+            vals[VAL_NEXT].raw  = rest;
+        } else {
+            vals[VAL_NEXT].kind = (uint8_t)MenuValueKind::Invalid;
+        }
+
         /* Akku: bei USB-Versorgung Text statt Spannung (Einheit wird dann nicht angehaengt). */
         if (powerStatus && powerStatus->getHasUSB()) {
             vals[VAL_BATT].kind = (uint8_t)MenuValueKind::Text;
@@ -144,7 +214,9 @@ class AlmemoMenuLocal
         if (e.item == itemInterval) {
             moduleConfig.telemetry.environment_update_interval = (uint32_t)e.raw;
             nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
-            vals[VAL_INTERVAL].raw = e.raw;
+            /* Zurueck auf "aus der Config ableiten", sonst zeigte die Anzeige
+             * bis zum naechsten Senden weiter das alte Intervall. */
+            pushedIntervalSecs = 0;
             LOG_INFO("AlmemoMenu: Sendeintervall -> %lds", (long)e.raw);
             return true;
         }
@@ -168,6 +240,7 @@ class AlmemoMenuLocal
     bool       built           = false;
     uint32_t   lastFingerprint = 0;
     uint32_t   lastSendMs      = 0;
+    uint32_t   pushedIntervalSecs = 0; /* 0 = noch nichts gesendet */
 
     uint8_t  itemInterval = MENU_NO_IDX;
     uint8_t  itemPreset   = MENU_NO_IDX;
@@ -175,7 +248,8 @@ class AlmemoMenuLocal
     uint16_t offPreset[16]{};  /* Pool-Offset je Preset-Enumwert */
     uint16_t offCustom    = MENU_NO_TEXT;
     uint16_t offStatus[STATUS_COUNT]{};
-    uint16_t offConn      = MENU_NO_TEXT;
+    uint16_t offType      = MENU_NO_TEXT;
+    uint16_t offChannels  = MENU_NO_TEXT;
     uint16_t offIdent     = MENU_NO_TEXT;
     uint16_t offVer       = MENU_NO_TEXT;
     uint16_t offFirmware  = MENU_NO_TEXT;
@@ -200,10 +274,12 @@ class AlmemoMenuLocal
         };
         auto fs = [&fb](const char *t) { fb(t ? t : "", t ? strlen(t) : 0); };
         fs(info.source);
-        fs(info.connection);
         fs(info.name);
         fs(info.version);
+        fb(&info.typeByte, 1);
+        fb(&info.i2cAddr, 1);
         fb(&info.channels, 1);
+        fb(&info.channelsMax, 1);
         fb(&pkt.count, 1);
         for (uint8_t i = 0; i < pkt.count && i < ALMEMO_MAX_VALUES; i++) {
             fb(&pkt.values[i].slot, 1);
@@ -247,7 +323,11 @@ class AlmemoMenuLocal
 
         /* Sensorinfos gehoeren in die Struktur (sie aendern sich nur mit dem
          * Fingerabdruck) — also vor finish() in den Pool. */
-        offConn     = b.str(info.connection && info.connection[0] ? info.connection : (info.source ? info.source : "-"));
+        char tbuf[20];
+        typeText(info, tbuf, sizeof(tbuf));
+        offType = b.str(tbuf);
+        channelsText(info, tbuf, sizeof(tbuf));
+        offChannels = b.str(tbuf);
         offIdent    = b.str(info.name && info.name[0] ? info.name : "-");
         offVer      = b.str(info.version && info.version[0] ? info.version : "-");
         offFirmware = b.str(optstr(APP_VERSION_SHORT));
@@ -286,9 +366,14 @@ class AlmemoMenuLocal
 
         const uint8_t numInterval = b.number(10, 3600, 4);
 
-        /* --- Messwert-Seiten: 5 Kanaele pro Seite --- */
+        /* --- Messwert-Seiten ---
+         * Die Countdown-Zeile zaehlt als zusaetzliche Zeile hinter den Kanaelen
+         * und wird IMMER gezeigt. Auf die letzte Seite passen dadurch nur vier
+         * Kanaele, und bei vielen Messstellen kommt eine Seite dazu
+         * (10 Kanaele -> 5 + 5 + Countdown = 3 Seiten). */
         const uint8_t n     = pkt.count > MAX_MEAS ? MAX_MEAS : pkt.count;
-        const uint8_t pages = n ? (uint8_t)((n + MENU_ROWS - 1) / MENU_ROWS) : 1;
+        const uint8_t rows  = (uint8_t)(n + 1); /* Kanaele + Countdown */
+        const uint8_t pages = n ? (uint8_t)((rows + MENU_ROWS - 1) / MENU_ROWS) : 1;
         for (uint8_t pg = 0; pg < pages; pg++) {
             if (pages > 1)
                 snprintf(buf, sizeof(buf), "MESSWERTE %u/%u", (unsigned)(pg + 1), (unsigned)pages);
@@ -302,8 +387,12 @@ class AlmemoMenuLocal
             }
             for (uint8_t r = 0; r < MENU_ROWS; r++) {
                 const uint8_t i = (uint8_t)(pg * MENU_ROWS + r);
-                if (i >= n)
+                if (i > n)
                     break;
+                if (i == n) { /* letzte Zeile hinter dem letzten Kanal */
+                    b.item("Nächste in", VAL_NEXT, "s");
+                    break;
+                }
                 char lbl[10], unit[4];
                 channelLabel(pkt.values[i].slot, lbl, sizeof(lbl));
                 unit[0] = pkt.values[i].unit[0];
@@ -315,7 +404,7 @@ class AlmemoMenuLocal
 
         /* --- Sensor --- */
         b.page("SENSOR", MenuPageKind::Status);
-        b.item("Anschluss", VAL_CONN);
+        b.item("Typ", VAL_TYPE);
         b.item("Kennung", VAL_IDENT);
         b.item("Version", VAL_VER);
         b.item("Kanäle", VAL_CHANS);
@@ -355,13 +444,12 @@ class AlmemoMenuLocal
 
         /* --- feste Werte auf die vorab abgelegten Offsets setzen --- */
         memset(vals, 0, sizeof(vals));
-        setTextOff(VAL_CONN, offConn);
+        setTextOff(VAL_TYPE, offType);
         setTextOff(VAL_IDENT, offIdent);
         setTextOff(VAL_VER, offVer);
         setTextOff(VAL_FIRMWARE, offFirmware);
         setTextOff(VAL_STATUS, offStatus[info.status < STATUS_COUNT ? info.status : 1]);
-        vals[VAL_CHANS].kind    = (uint8_t)MenuValueKind::Int;
-        vals[VAL_CHANS].raw     = info.channels;
+        setTextOff(VAL_CHANS, offChannels);
         vals[VAL_PACKETS].kind  = (uint8_t)MenuValueKind::Int;
         vals[VAL_INTERVAL].kind = (uint8_t)MenuValueKind::Duration;
 
