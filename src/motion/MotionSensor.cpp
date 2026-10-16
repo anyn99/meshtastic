@@ -1,5 +1,10 @@
 #include "MotionSensor.h"
 #include "graphics/draw/CompassRenderer.h"
+// Lokaler Fix (Upstream-Datei): 'config' kam hier bisher nur transitiv ueber
+// graphics/Screen.h herein, und dieser Include-Pfad existiert dort nur im
+// HAS_SCREEN-Zweig. Mit MESHTASTIC_EXCLUDE_SCREEN fehlt die Deklaration,
+// obwohl wakeScreen() weiter kompiliert wird -> direkt inkludieren.
+#include "mesh/NodeDB.h"
 
 #if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_I2C
 
