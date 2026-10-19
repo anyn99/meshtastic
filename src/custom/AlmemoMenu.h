@@ -94,6 +94,18 @@
  * dessen Aktionen genauso verstehen wie die seines eigenen. */
 #define MENU_ACTION_SWAP_DISPLAY 0x01 /* zwischen Node- und Receiver-Menue wechseln */
 
+/* Semantische Kennung einer Einstellung, in MenuItem::setting.
+ *
+ * Gebraucht fuer "Auf beide anwenden": ein Edit traegt den ITEM-INDEX, und der
+ * ist nur im eigenen Menue gueltig. Soll dieselbe Aenderung auch auf dem
+ * anderen Geraet landen, muss sie ueber ihre BEDEUTUNG identifiziert werden --
+ * Item 1 im Receiver-Menue ist etwas anderes als Item 1 im Node-Menue.
+ *
+ * Nur Einstellungen brauchen das; Anzeigeitems bleiben bei MENU_SETTING_NONE. */
+#define MENU_SETTING_NONE     0x00
+#define MENU_SETTING_INTERVAL 0x01 /* moduleConfig.telemetry.environment_update_interval */
+#define MENU_SETTING_PRESET   0x02 /* config.lora.modem_preset */
+
 // =========================================================================
 //  Modell — alles POD und serialisierbar
 // =========================================================================
@@ -131,7 +143,7 @@ struct MenuItem { /* 10 Byte */
     uint8_t  target; /* Submenu: Seite · EditEnum: Optionsliste */
     uint8_t  numSpec;/* EditEnum/EditNumber: Index in numbers[], sonst MENU_NO_IDX */
     uint8_t  flags;
-    uint8_t  _pad;
+    uint8_t  setting; /* MENU_SETTING_* -- Bedeutung, nicht Position */
 };
 
 struct MenuPage { /* 8 Byte */
@@ -270,7 +282,7 @@ class MenuBuilder
 
     uint8_t item(const char *label, uint8_t valueIdx = MENU_NO_IDX, const char *unit = nullptr,
                  MenuItemKind kind = MenuItemKind::Display, uint8_t target = MENU_NO_IDX,
-                 uint8_t numSpec = MENU_NO_IDX, uint8_t flags = 0)
+                 uint8_t numSpec = MENU_NO_IDX, uint8_t flags = 0, uint8_t setting = MENU_SETTING_NONE)
     {
         if (m.itemCount >= MENU_MAX_ITEMS || curPage == MENU_NO_IDX)
             return MENU_NO_IDX;
@@ -283,6 +295,7 @@ class MenuBuilder
         it.target         = target;
         it.numSpec        = numSpec;
         it.flags          = flags;
+        it.setting        = setting;
         /* valueCount mitfuehren: der Menue-Kanal dimensioniert damit den
          * Werteblock, ohne die Struktur zu kennen (s. AlmemoMenuWire.h). Vorher
          * war das Feld deklariert, aber von niemandem gesetzt. */

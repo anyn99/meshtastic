@@ -230,28 +230,39 @@ class AlmemoMenuLocal
     {
         if (!built || e.item >= s.itemCount)
             return false;
-        if (e.item == itemInterval) {
-            moduleConfig.telemetry.environment_update_interval = (uint32_t)e.raw;
+        return applySetting(s.items[e.item].setting, e.raw);
+    }
+
+    /**
+     * Eine Einstellung nach ihrer BEDEUTUNG anwenden.
+     *
+     * Getrennt von apply(), weil "Auf beide anwenden" dieselbe Aenderung aus
+     * dem Receiver-Menue hier landen laesst -- und dessen Item-Index bedeutet
+     * bei uns nichts. Siehe MENU_SETTING_* in AlmemoMenu.h.
+     */
+    bool applySetting(uint8_t setting, int32_t raw)
+    {
+        switch (setting) {
+        case MENU_SETTING_INTERVAL:
+            moduleConfig.telemetry.environment_update_interval = (uint32_t)raw;
             nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
             /* Zurueck auf "aus der Config ableiten", sonst zeigte die Anzeige
              * bis zum naechsten Senden weiter das alte Intervall. */
             pushedIntervalSecs = 0;
-            LOG_INFO("AlmemoMenu: Sendeintervall -> %lds", (long)e.raw);
+            LOG_INFO("AlmemoMenu: Sendeintervall -> %lds", (long)raw);
             return true;
-        }
-        if (e.item == itemPreset) {
-            config.lora.modem_preset = (meshtastic_Config_LoRaConfig_ModemPreset)e.raw;
+        case MENU_SETTING_PRESET:
+            config.lora.modem_preset = (meshtastic_Config_LoRaConfig_ModemPreset)raw;
             config.lora.use_preset   = true;
             nodeDB->saveToDisk(SEGMENT_CONFIG);
             LOG_INFO("AlmemoMenu: Preset -> %s",
                      DisplayFormatters::getModemPresetDisplayName(config.lora.modem_preset, false, true));
             return true;
+        default:
+            return false;
         }
-        return false;
     }
 
-    /** Item-Index der Preset-Einstellung (fuer "Auf beide anwenden"). */
-    uint8_t presetItem() const { return itemPreset; }
 
   private:
     MenuStruct s{};
@@ -262,8 +273,6 @@ class AlmemoMenuLocal
     uint32_t   pushedIntervalSecs = 0; /* 0 = noch nichts gesendet */
     uint32_t   lastPackets        = 0; /* ueberlebt rebuild() */
 
-    uint8_t  itemInterval = MENU_NO_IDX;
-    uint8_t  itemPreset   = MENU_NO_IDX;
     uint16_t offUsb       = MENU_NO_TEXT;
     uint16_t offPreset[16]{};  /* Pool-Offset je Preset-Enumwert */
     uint16_t offCustom    = MENU_NO_TEXT;
@@ -421,9 +430,10 @@ class AlmemoMenuLocal
          *     ueberspringt Seiten der Art Menu. --- */
         const uint8_t pageMenu = s.pageCount;
         b.page("EINSTELLUNGEN", MenuPageKind::Menu);
-        itemInterval = b.item("Sendeintervall", VAL_INTERVAL, nullptr, MenuItemKind::EditEnum, enumInterval, numInterval);
-        itemPreset   = b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
-                              config.lora.use_preset ? 0 : MENU_ITEM_DISABLED);
+        b.item("Sendeintervall", VAL_INTERVAL, nullptr, MenuItemKind::EditEnum, enumInterval, numInterval, 0,
+               MENU_SETTING_INTERVAL);
+        b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
+               config.lora.use_preset ? 0 : MENU_ITEM_DISABLED, MENU_SETTING_PRESET);
         /* Nur erreichbar, solange das Display das Node-Menue zeigt -- also
          * entweder ohne aufgesteckten Receiver (dann folgenlos) oder nachdem man
          * dort "-> Node-Display" gewaehlt hat. Dies ist der Weg zurueck. */
