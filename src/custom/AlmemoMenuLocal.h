@@ -361,7 +361,7 @@ class AlmemoMenuLocal
         offChannels = b.str(tbuf);
         offIdent    = b.str(info.name && info.name[0] ? info.name : "-");
         offVer      = b.str(info.version && info.version[0] ? info.version : "-");
-        offFirmware = b.str(optstr(APP_VERSION_SHORT));
+        offFirmware = b.str(optstr(APP_VERSION));
 
         /* --- Auswahllisten: geteilt mit dem Receiver, s. AlmemoMenuSettings.h --- */
         const uint8_t enumInterval = menudef::intervalEnum(b);

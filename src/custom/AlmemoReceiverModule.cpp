@@ -737,7 +737,7 @@ void I2CSlaveThread::buildMenu()
     /* Texte vorab in den Pool -- nach finish() darf nichts mehr dazu. */
     offIdent    = b.str(ident[0] ? ident : "-");
     offVer      = b.str(verTrim[0] ? verTrim : "-");
-    offFirmware = b.str(optstr(APP_VERSION_SHORT));
+    offFirmware = b.str(optstr(APP_VERSION));
     /* "Typ" ist die ALMEMO-Generation, die wir emulieren -- aus der Version
      * abgeleitet, genau wie der Node es tut (6.xx = D6, 7.xx = D7). */
     offType = b.str(verTrim[0] == '7' ? "D7" : "D6");
