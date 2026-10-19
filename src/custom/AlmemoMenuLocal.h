@@ -6,6 +6,7 @@
 
 #include "AlmemoCommon.h"
 #include "AlmemoMenu.h"
+#include "AlmemoMenuSettings.h"
 #include "DisplayFormatters.h"
 #include "NodeDB.h"
 #include "PowerStatus.h"
@@ -28,9 +29,6 @@
 
 /* Spiegelt den Default des Senders; gleicher #ifndef-Guard, also derselbe
  * Wert auch wenn das Env ihn ueberschreibt. */
-#ifndef ALMEMO_SENDER_DEFAULT_INTERVAL_SECS
-#define ALMEMO_SENDER_DEFAULT_INTERVAL_SECS 30
-#endif
 
 /** Was der Sender ueber seine aktuelle Quelle mitteilt. */
 struct AlmemoMenuSensorInfo {
@@ -354,39 +352,10 @@ class AlmemoMenuLocal
         offVer      = b.str(info.version && info.version[0] ? info.version : "-");
         offFirmware = b.str(optstr(APP_VERSION_SHORT));
 
-        /* --- Auswahllisten --- */
-        const uint8_t enumInterval = b.beginEnum();
-        b.option("10s", 10);
-        b.option("30s", 30);
-        b.option("1min", 60);
-        b.option("2min", 120);
-        b.option("5min", 300);
-        b.option("10min", 600);
-        b.option("15min", 900);
-        b.option("30min", 1800);
-        b.option("60min", 3600);
-        b.option("Manuell", MENU_OPT_MANUAL);
-        b.option("<- Abbrechen", MENU_OPT_CANCEL);
-
-        /* Reihenfolge nach Reichweite absteigend, wie im Menuekonzept. */
-        static const meshtastic_Config_LoRaConfig_ModemPreset PRESETS[] = {
-            meshtastic_Config_LoRaConfig_ModemPreset_LONG_MODERATE, meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
-            meshtastic_Config_LoRaConfig_ModemPreset_LONG_TURBO,    meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW,
-            meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,   meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW,
-            meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST,    meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
-        };
-        const uint8_t enumPreset = b.beginEnum();
-        memset(offPreset, 0, sizeof(offPreset));
-        for (auto p : PRESETS) {
-            /* Der Optionstext ist derselbe, den die Einstellungs-Seite anzeigt —
-             * einmal ablegen, Offset fuer den Wert merken. */
-            const uint16_t off = b.option(DisplayFormatters::getModemPresetDisplayName(p, false, true), (int32_t)p);
-            if ((uint8_t)p < 16)
-                offPreset[(uint8_t)p] = off;
-        }
-        b.option("<- Abbrechen", MENU_OPT_CANCEL);
-
-        const uint8_t numInterval = b.number(10, 3600, 4);
+        /* --- Auswahllisten: geteilt mit dem Receiver, s. AlmemoMenuSettings.h --- */
+        const uint8_t enumInterval = menudef::intervalEnum(b);
+        const uint8_t enumPreset   = menudef::presetEnum(b, offPreset);
+        const uint8_t numInterval  = menudef::intervalNumber(b);
 
         /* --- Messwert-Seiten ---
          * Die Countdown-Zeile zaehlt als zusaetzliche Zeile hinter den Kanaelen
@@ -455,6 +424,10 @@ class AlmemoMenuLocal
         itemInterval = b.item("Sendeintervall", VAL_INTERVAL, nullptr, MenuItemKind::EditEnum, enumInterval, numInterval);
         itemPreset   = b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
                               config.lora.use_preset ? 0 : MENU_ITEM_DISABLED);
+        /* Nur erreichbar, solange das Display das Node-Menue zeigt -- also
+         * entweder ohne aufgesteckten Receiver (dann folgenlos) oder nachdem man
+         * dort "-> Node-Display" gewaehlt hat. Dies ist der Weg zurueck. */
+        b.item("-> Receiver-Display", MENU_NO_IDX, nullptr, MenuItemKind::Action, MENU_ACTION_SWAP_DISPLAY);
         b.item("<- Zurück", MENU_NO_IDX, nullptr, MenuItemKind::Back);
 
         /* --- Einstellungen: letzte Status-Seite, langer Druck oeffnet das Menue --- */

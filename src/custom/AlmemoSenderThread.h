@@ -7,6 +7,8 @@
 #include "AlmemoCommon.h"
 #include "AlmemoD7Sensor.h"
 #include "AlmemoI2CClock.h"
+#include "AlmemoMenu.h"
+#include "AlmemoMenuSettings.h"
 #include "AlmemoMenuWire.h"
 #include "AlmemoLed.h"
 #if defined(ALMEMO_EINK)
@@ -81,10 +83,6 @@ static uint32_t almemoNextSendCount()
     almemoSendCount.check = ALMEMO_SEND_COUNT_MAGIC ^ almemoSendCount.count ^ 0xA5A5A5A5u;
     return almemoSendCount.count;
 }
-#endif
-
-#ifndef ALMEMO_SENDER_DEFAULT_INTERVAL_SECS
-#define ALMEMO_SENDER_DEFAULT_INTERVAL_SECS 30
 #endif
 
 #ifndef ALMEMO_SENDER_THREADINTERVAL_MS
@@ -224,8 +222,10 @@ class AlmemoSenderThread : public concurrency::OSThread
      */
     static bool menuChannelPresent(MenuWireHeader *out = nullptr)
     {
+        /* 16-Bit-Zeiger, big endian (s. AlmemoMenuWire.h). */
         Wire.beginTransmission(ALMEMO_MENU_I2C_ADDR);
-        Wire.write((uint8_t)ALMEMO_MENU_OFF_HEADER);
+        Wire.write((uint8_t)(ALMEMO_MENU_OFF_HEADER >> 8));
+        Wire.write((uint8_t)(ALMEMO_MENU_OFF_HEADER & 0xFF));
         if (Wire.endTransmission() != 0)
             return false;
 
@@ -240,6 +240,33 @@ class AlmemoSenderThread : public concurrency::OSThread
             return false;
         if (out)
             *out = h;
+        return true;
+    }
+
+    /**
+     * Passt die Struktur der Gegenseite zu unserem Modell?
+     *
+     * Die Struktur geht ROH ueber den Bus, und beide Boards werden getrennt
+     * geflasht. Stimmen die Zaehler, unterscheiden sich aber die
+     * MENU_MAX_*-Kapazitaeten, liegen die Array-Offsets verschoben und man liest
+     * lautlos Muell -- deshalb der Vergleich von structSize mit der eigenen
+     * sizeof. "Angedockt" bleibt davon unberuehrt: dafuer genuegt das Magic.
+     */
+    static bool menuChannelUsable(const MenuWireHeader &h, const char **why = nullptr)
+    {
+        auto no = [&](const char *reason) {
+            if (why)
+                *why = reason;
+            return false;
+        };
+        if (h.modelVersion != ALMEMO_MENU_MODEL_VERSION)
+            return no("Modellversion");
+        if (h.structSize != (uint16_t)sizeof(MenuStruct))
+            return no("Strukturgroesse");
+        if (h.pageCount > MENU_MAX_PAGES || h.itemCount > MENU_MAX_ITEMS || h.valueCount > MENU_MAX_VALUES ||
+            h.enumCount > MENU_MAX_ENUMS || h.optionCount > MENU_MAX_OPTIONS || h.numberCount > MENU_MAX_NUMBERS ||
+            h.poolLen > MENU_POOL)
+            return no("Zaehler ausserhalb unserer Kapazitaet");
         return true;
     }
 
@@ -318,11 +345,20 @@ class AlmemoSenderThread : public concurrency::OSThread
             const bool     docked = menuChannelPresent(&mh);
             if (docked != menuDockedLogged) {
                 menuDockedLogged = docked;
-                if (docked)
-                    LOG_INFO("AlmemoSender: Receiver angedockt (Menue @0x%02x, Modell v%u, hash %08lx)",
-                             (unsigned)ALMEMO_MENU_I2C_ADDR, (unsigned)mh.modelVersion,
-                             (unsigned long)mh.hash);
-                else
+                if (docked) {
+                    const char *why = nullptr;
+                    if (menuChannelUsable(mh, &why))
+                        LOG_INFO("AlmemoSender: Receiver angedockt (Menue @0x%02x, v%u, %u Seiten, "
+                                 "%u Items, %u Werte, %u Pool, hash %08lx)",
+                                 (unsigned)ALMEMO_MENU_I2C_ADDR, (unsigned)mh.modelVersion,
+                                 (unsigned)mh.pageCount, (unsigned)mh.itemCount, (unsigned)mh.valueCount,
+                                 (unsigned)mh.poolLen, (unsigned long)mh.hash);
+                    else
+                        LOG_WARN("AlmemoSender: Receiver angedockt, Menue unbrauchbar (%s): v%u vs v%u, "
+                                 "%u B vs %u B -- eine der beiden Firmwares ist veraltet",
+                                 why, (unsigned)mh.modelVersion, (unsigned)ALMEMO_MENU_MODEL_VERSION,
+                                 (unsigned)mh.structSize, (unsigned)sizeof(MenuStruct));
+                } else
                     LOG_INFO("AlmemoSender: Receiver abgezogen (kein Menue @0x%02x)",
                              (unsigned)ALMEMO_MENU_I2C_ADDR);
             }

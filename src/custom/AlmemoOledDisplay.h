@@ -7,6 +7,7 @@
 #include "AlmemoI2CClock.h"
 #include "AlmemoMenu.h"
 #include "AlmemoMenuLocal.h"
+#include "AlmemoMenuRemote.h"
 #include "AlmemoMenuRenderer.h"
 #include "concurrency/OSThread.h"
 
@@ -26,10 +27,14 @@
  *   MenuRenderer    -> Display
  *   AlmemoMenuLocal -- Daten dieses Nodes
  *
- * Wird spaeter ein Receiver aufgesteckt, kommt hier nur eine zweite Quelle
- * dazu (I2C statt lokal) und `src` zeigt auf sie — Renderer und Controller
- * bleiben unberuehrt. Laut Konzept gilt dann: aufgesteckt = Display gehoert
+ * Ist ein Receiver aufgesteckt, liefert AlmemoMenuRemote die zweite Quelle
+ * (I2C statt lokal) und activeStruct() zeigt auf sie — Renderer und Controller
+ * bleiben unberuehrt. Laut Konzept gilt: aufgesteckt = Display gehoert
  * ausschliesslich dem Receiver, zum Bedienen des Nodes wird er abgezogen.
+ *
+ * Noch nicht moeglich sind AENDERUNGEN am Receiver-Menue: dafuer fehlt der
+ * Rueckweg (Edit als Write auf den Menue-Kanal). applyEdit() loggt das, statt
+ * es stillschweigend zu verwerfen.
  *
  * ---------------------------------------------------------------------------
  * WICHTIG, I2C-Bustakt: Das Display haengt am selben Bus (globales `Wire`) wie
@@ -162,6 +167,28 @@ class AlmemoOledThread : public concurrency::OSThread
             lastPollMs = now;
             if (local.poll())
                 dirty = true;
+
+            /* Menue des aufgesteckten Receivers holen. Sobald eine gueltige
+             * Struktur da ist, zeigt das Display sie statt der lokalen
+             * (s. activeStruct()).
+             *
+             * Steckt nichts, kostet das einen NACKenden 2-Byte-Write pro
+             * Intervall. Steckt etwas, kommt bei geaendertem Hash eine
+             * BLOCKIERENDE Strukturuebertragung von ~295 ms dazu (s.
+             * AlmemoMenuRemote.h) -- danach nur noch ~60 ms fuer die Werte. */
+            if (remote.poll()) {
+                dirty = true; /* Quellenwechsel und neue Werte muessen neu zeichnen */
+                if (!remote.structure()) {
+                    forceLocal = false; /* Abziehen stellt die Standardregel her */
+                    LOG_INFO("AlmemoOled: Receiver-Menue weg");
+                }
+                else
+                    /* Nur DEBUG: eine neue Struktur meldet AlmemoMenuRemote
+                     * selbst mit INFO. Hier bleiben die Wertaenderungen uebrig,
+                     * und die kommen im Anzeige-Intervall. */
+                    LOG_DEBUG("AlmemoOled: Receiver-Werte aktualisiert (hash %08lx)",
+                              (unsigned long)remote.hash());
+            }
         }
 
         if (dirty) {
@@ -190,48 +217,131 @@ class AlmemoOledThread : public concurrency::OSThread
     static void onShortStatic(void *ctx) { static_cast<AlmemoOledThread *>(ctx)->onShort(); }
     static void onLongStatic(void *ctx) { static_cast<AlmemoOledThread *>(ctx)->onLong(); }
 
+    /*
+     * Aktive Quelle. Steckt ein Receiver, gehoert das Display AUSSCHLIESSLICH
+     * ihm -- so ist das Konzept: zum Bedienen des Nodes wird der Receiver
+     * abgezogen. Renderer und Controller merken keinen Unterschied, beide
+     * sehen nur MenuStruct + MenuValue[].
+     */
+    /* Steckt ein Receiver, gehoert ihm das Display -- ausser der Benutzer hat im
+     * Menue bewusst auf das Node-Display gewechselt. Die Umkehrung gibt es
+     * nicht: ohne Receiver-Struktur ist nichts anzuzeigen. */
+    bool              remoteActive() const { return remote.structure() != nullptr && !forceLocal; }
+    /* BEIDE muessen ueber remoteActive() gehen. Fragt eines davon
+     * remote.structure() direkt ab, ignoriert es forceLocal -- und dann zeigt
+     * das Display die Receiver-Struktur mit den Node-Werten, also die
+     * GW-Seiten mit ins Leere greifenden Wertindizes. */
+    const MenuStruct *activeStruct() const
+    {
+        return remoteActive() ? remote.structure() : local.structure();
+    }
+    const MenuValue *activeValues() const { return remoteActive() ? remote.values() : local.values(); }
+
+    /** Eine Aenderung an die aktive Quelle geben. */
+    void applyEdit(const MenuEdit &edit)
+    {
+        /* Aktionen fuehrt immer das Geraet mit dem Display aus, egal aus welchem
+         * Menue sie kommen -- sie gehen also NICHT an die Quelle. */
+        const MenuStruct *s = activeStruct();
+        if (s && edit.item < s->itemCount && (MenuItemKind)s->items[edit.item].kind == MenuItemKind::Action) {
+            runMenuAction((uint8_t)edit.raw);
+            return;
+        }
+
+        if (!remoteActive()) {
+            local.apply(edit);
+            return;
+        }
+        /* Noch kein Rueckweg: Edits muessten als Write auf den Menue-Kanal
+         * gehen (itemIdx + raw, s. AlmemoMenuWire.h), und dafuer fehlt die
+         * Gegenseite im Receiver. Bis dahin NICHT stillschweigend verwerfen --
+         * sonst sieht es wie ein Bedienfehler aus. */
+        LOG_WARN("AlmemoOled: Aenderung am Receiver-Menue noch nicht moeglich (Item %u, raw %ld)",
+                 (unsigned)edit.item, (long)edit.raw);
+    }
+
+    /** MENU_ACTION_* ausfuehren. */
+    void runMenuAction(uint8_t code)
+    {
+        switch (code) {
+        case MENU_ACTION_SWAP_DISPLAY:
+            if (!remote.structure()) {
+                /* Vom Node-Menue aus gewaehlt, ohne dass ein Receiver steckt --
+                 * dann gibt es nichts, worauf man wechseln koennte. */
+                LOG_INFO("AlmemoOled: kein Receiver aufgesteckt, Anzeige bleibt beim Node");
+                break;
+            }
+            forceLocal = !forceLocal;
+            MenuController::reset(state);
+            break;
+        default:
+            LOG_WARN("AlmemoOled: unbekannte Menue-Aktion %u", (unsigned)code);
+            break;
+        }
+        dirty = true;
+    }
+
     void onShort()
     {
-        const MenuStruct *s = local.structure();
+        const MenuStruct *s = activeStruct();
         if (!s)
             return;
         MenuEdit edit{};
-        if (MenuController::shortPress(*s, local.values(), state, edit))
-            local.apply(edit);
+        if (MenuController::shortPress(*s, activeValues(), state, edit))
+            applyEdit(edit);
         dirty = true;
     }
 
     void onLong()
     {
-        const MenuStruct *s = local.structure();
+        const MenuStruct *s = activeStruct();
         if (!s)
             return;
         MenuEdit edit{};
-        if (MenuController::longPress(*s, local.values(), state, edit))
-            local.apply(edit);
+        if (MenuController::longPress(*s, activeValues(), state, edit))
+            applyEdit(edit);
         dirty = true;
     }
 
     void render()
     {
-        const MenuStruct *s = local.structure();
+        const MenuStruct *s = activeStruct();
         if (!s) {
             MenuRenderer::renderWaiting(display, "warte auf Werte");
             return;
         }
+
+        /* Quellenwechsel: Zustand zuruecksetzen. Die Seitenindizes der beiden
+         * Menues bedeuten Verschiedenes, und ein offener Edit-Dialog gehoerte
+         * zur alten Quelle -- stehenlassen waere schlimmer als ein Sprung auf
+         * die erste Seite. */
+        const bool rem = remoteActive();
+        if (rem != lastRemoteActive) {
+            lastRemoteActive = rem;
+            MenuController::reset(state);
+            LOG_INFO("AlmemoOled: Display zeigt jetzt das %s-Menue", rem ? "Receiver" : "Node");
+        }
+
         /* Nach einem Strukturneubau kann der Zustand auf eine Seite zeigen,
          * die es nicht mehr gibt — dann zurueck auf den Anfang. */
         if (state.statusPage >= s->pageCount ||
             (MenuPageKind)s->pages[state.statusPage].kind != MenuPageKind::Status)
             MenuController::reset(state);
 
-        MenuRenderer::render(display, *s, local.values(), state);
+        MenuRenderer::render(display, *s, activeValues(), state);
     }
 
     AlmemoSSD1306 display{ALMEMO_OLED_ADDR, -1, -1, GEOMETRY_128_64, I2C_ONE, /* frequency */ -1};
     OneButton     button{ALMEMO_BUTTON_PIN, /* activeLow */ true, /* pullupActive */ true};
 
-    AlmemoMenuLocal local;
+    AlmemoMenuLocal  local;
+    AlmemoMenuRemote remote;
+    /* Letzte aktive Quelle, fuer den Zustandsreset beim Wechsel. */
+    bool lastRemoteActive = false;
+    /* Benutzer hat im Menue auf das Node-Display gewechselt. Wird beim Abziehen
+     * zurueckgesetzt: "aufgesteckt = Receiver" soll nach dem erneuten Anstecken
+     * wieder gelten, sonst waere der Zustand unsichtbar und ueberraschend. */
+    bool forceLocal = false;
     MenuState       state;
     bool            dirty      = false;
     uint32_t        lastPollMs = 0;
