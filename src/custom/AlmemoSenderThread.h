@@ -149,6 +149,8 @@ class AlmemoSenderThread : public concurrency::OSThread
     bool emptyPublished = false;
     /* Letzter geloggter Andock-Zustand, s. probeSensors(). */
     bool menuDockedLogged = false;
+    /* Aktueller Andock-Zustand. Steckt ein Receiver, sendet dieser Node nicht. */
+    bool receiverDocked = false;
     uint32_t waitStartMs = 0;
 
     static bool sensorPowerSaving()
@@ -337,9 +339,9 @@ class AlmemoSenderThread : public concurrency::OSThread
         source = SRC_EMULATOR; // kein echtes I2C-Probing; Quelle ist immer "vorhanden"
         return true;
 #else
-        /* Andock-Kennung zuerst: steckt ein Receiver, soll das spaeter das
-         * Sensor-Probing ersetzen. Heute nur geloggt, und nur bei Wechsel --
-         * probeSensors() laeuft im 500-ms-Takt, solange nichts erkannt ist. */
+        /* Andock-Kennung zuerst -- sie ERSETZT das Sensor-Probing, s. unten.
+         * Geloggt wird nur bei Wechsel: probeSensors() laeuft im 500-ms-Takt,
+         * solange nichts erkannt ist. */
         {
             MenuWireHeader mh{};
             const bool     docked = menuChannelPresent(&mh);
@@ -361,6 +363,24 @@ class AlmemoSenderThread : public concurrency::OSThread
                 } else
                     LOG_INFO("AlmemoSender: Receiver abgezogen (kein Menue @0x%02x)",
                              (unsigned)ALMEMO_MENU_I2C_ADDR);
+            }
+            receiverDocked = docked;
+
+            if (docked) {
+                /* Ein angedockter Receiver ist KEINE Messquelle. Er traegt
+                 * Werte, die er selbst per LoRa empfangen hat -- lesen wir die
+                 * ueber I2C aus seinem emulierten EEPROM und senden sie erneut,
+                 * bekommt er sie zurueck, legt sie wieder ab, und das Paket
+                 * kreist endlos.
+                 *
+                 * Deshalb hier abbrechen, bevor 0x50/0x51 ueberhaupt geprobt
+                 * werden: solange er steckt, sendet dieser Node nichts. Das
+                 * Display gehoert ohnehin seinem Menue.
+                 *
+                 * Annahme dabei: er sitzt physisch auf der Sensorleitung, es
+                 * gibt also keinen zweiten, echten Fuehler, dessen Werte man
+                 * gefahrlos senden koennte. */
+                return false;
             }
         }
 
@@ -718,7 +738,10 @@ class AlmemoSenderThread : public concurrency::OSThread
         if (source == SRC_NONE) {
             if (!probeSensors()) {
                 if (almemoLedThread)
-                    almemoLedThread->setState(AlmemoLedState::NoSensor); // gelb blinken
+                    /* Angedockter Receiver ist kein Fehlerzustand: es gibt
+                     * bewusst nichts zu senden, also nicht gelb blinken. */
+                    almemoLedThread->setState(receiverDocked ? AlmemoLedState::Idle
+                                                             : AlmemoLedState::NoSensor);
                 return ALMEMO_SENDER_PROBE_INTERVAL_MS;
             }
         }
