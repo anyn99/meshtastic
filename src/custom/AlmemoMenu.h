@@ -86,6 +86,14 @@
 /* Item-Flags */
 #define MENU_ITEM_DISABLED 0x01 /* nicht auswaehlbar (z.B. Preset bei use_preset=0) */
 
+/* Codes fuer MenuItemKind::Action, uebertragen in MenuItem::target.
+ *
+ * Aktionen fuehrt immer der HOST aus, also das Geraet mit dem Display -- nicht
+ * der Eigentuemer des Menues. Darum liegen sie hier im Modell und nicht in
+ * einer der beiden Quellen: der Node holt sich das Receiver-Menue und muss
+ * dessen Aktionen genauso verstehen wie die seines eigenen. */
+#define MENU_ACTION_SWAP_DISPLAY 0x01 /* zwischen Node- und Receiver-Menue wechseln */
+
 // =========================================================================
 //  Modell — alles POD und serialisierbar
 // =========================================================================
@@ -97,6 +105,7 @@ enum class MenuItemKind : uint8_t {
     Submenu,    /* oeffnet target */
     Back,       /* eine Ebene zurueck */
     Hint,       /* Tastenhinweis, linksbuendig, kein Wert */
+    Action,     /* Aktion ohne Wert; target traegt den Code (MENU_ACTION_*) */
 };
 
 enum class MenuPageKind : uint8_t {
@@ -176,6 +185,35 @@ struct MenuStruct {
     const char *text(uint16_t off) const { return (off == MENU_NO_TEXT || off >= poolLen) ? "" : &pool[off]; }
 };
 
+/**
+ * FNV-1a ueber die BELEGTEN Teile einer MenuStruct.
+ *
+ * Eine Implementierung fuer beide Richtungen: der Builder legt den Wert in
+ * m.hash ab, und die Gegenseite des Menue-Kanals rechnet ihn ueber die geholte
+ * Struktur nach. Liefen die auseinander, wuerde jede Pruefung fehlschlagen oder
+ * -- schlimmer -- eine zerrissene Struktur durchwinken.
+ *
+ * m.hash selbst geht NICHT ein, sonst waere der Wert nicht nachrechenbar.
+ */
+inline uint32_t menuHash(const MenuStruct &m)
+{
+    uint32_t h   = 2166136261u;
+    auto     feed = [&h](const void *p, size_t n) {
+        const uint8_t *b = (const uint8_t *)p;
+        for (size_t i = 0; i < n; i++) {
+            h ^= b[i];
+            h *= 16777619u;
+        }
+    };
+    feed(m.pages, sizeof(MenuPage) * m.pageCount);
+    feed(m.items, sizeof(MenuItem) * m.itemCount);
+    feed(m.enums, sizeof(MenuEnum) * m.enumCount);
+    feed(m.options, sizeof(MenuOption) * m.optionCount);
+    feed(m.numbers, sizeof(MenuNumber) * m.numberCount);
+    feed(m.pool, m.poolLen);
+    return h;
+}
+
 // =========================================================================
 //  Builder — fuellt eine MenuStruct auf
 // =========================================================================
@@ -245,6 +283,11 @@ class MenuBuilder
         it.target         = target;
         it.numSpec        = numSpec;
         it.flags          = flags;
+        /* valueCount mitfuehren: der Menue-Kanal dimensioniert damit den
+         * Werteblock, ohne die Struktur zu kennen (s. AlmemoMenuWire.h). Vorher
+         * war das Feld deklariert, aber von niemandem gesetzt. */
+        if (valueIdx != MENU_NO_IDX && (uint16_t)(valueIdx + 1) > m.valueCount)
+            m.valueCount = (uint8_t)(valueIdx + 1);
         m.pages[curPage].itemCount++;
         return idx;
     }
@@ -281,24 +324,7 @@ class MenuBuilder
     }
 
     /** Hash bilden. Danach ist die Struktur fertig. */
-    void finish()
-    {
-        uint32_t h = 2166136261u; /* FNV-1a, reine Aenderungserkennung */
-        auto feed  = [&h](const void *p, size_t n) {
-            const uint8_t *b = (const uint8_t *)p;
-            for (size_t i = 0; i < n; i++) {
-                h ^= b[i];
-                h *= 16777619u;
-            }
-        };
-        feed(m.pages, sizeof(MenuPage) * m.pageCount);
-        feed(m.items, sizeof(MenuItem) * m.itemCount);
-        feed(m.enums, sizeof(MenuEnum) * m.enumCount);
-        feed(m.options, sizeof(MenuOption) * m.optionCount);
-        feed(m.numbers, sizeof(MenuNumber) * m.numberCount);
-        feed(m.pool, m.poolLen);
-        m.hash = h;
-    }
+    void finish() { m.hash = menuHash(m); }
 };
 
 // =========================================================================
@@ -504,7 +530,7 @@ class MenuController
             break;
         }
         case MenuMode::Menu:
-            return activateMenuItem(s, vals, st);
+            return activateMenuItem(s, vals, st, out);
         case MenuMode::SelectList:
             return activateOption(s, st);
         case MenuMode::DigitEdit:
@@ -556,7 +582,7 @@ class MenuController
             st.scroll = (uint8_t)(st.cursor - window + 1);
     }
 
-    static bool activateMenuItem(const MenuStruct &s, const MenuValue *vals, MenuState &st)
+    static bool activateMenuItem(const MenuStruct &s, const MenuValue *vals, MenuState &st, MenuEdit &out)
     {
         const MenuPage &p = s.pages[st.menuPage];
         if (!p.itemCount)
@@ -593,6 +619,16 @@ class MenuController
             st.numSpec  = it.numSpec;
             startDigits(s, vals, st, it);
             break;
+        case MenuItemKind::Action:
+            /* Kein Confirm-Dialog: eine Aktion hat keinen Wert, den man
+             * bestaetigen koennte, und ist sofort sichtbar. Zurueck ins
+             * Karussell, damit man das Ergebnis gleich sieht. */
+            out.item    = idx;
+            out.raw     = (int32_t)it.target;
+            out.targets = MENU_TARGET_SELF;
+            st.mode     = MenuMode::Carousel;
+            st.cursor = st.scroll = 0;
+            return true;
         default:
             break;
         }
