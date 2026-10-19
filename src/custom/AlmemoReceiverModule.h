@@ -152,6 +152,9 @@ class I2CSlaveThread : public concurrency::OSThread
      * Werteblock setzt daraus die Text-Werte, ohne sie ein zweites Mal
      * abzulegen -- nach finish() darf nichts mehr in den Pool. */
     uint16_t offType = 0, offIdent = 0, offVer = 0, offFirmware = 0;
+#if APP_DIRTY
+    uint16_t offDirty = 0;
+#endif
     uint16_t offPreset[16]{}; /* Pool-Offset je Preset-Enumwert */
     uint8_t findOrAllocSlot(uint32_t node_id, uint8_t sub);
     void    initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent);

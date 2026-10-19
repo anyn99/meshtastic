@@ -69,6 +69,13 @@
 
 #define MENU_ROWS 5 /* Inhaltszeilen pro Seite */
 
+/* 1 = aus einem Arbeitsbaum mit nicht eingecheckten Aenderungen gebaut; setzt
+ * bin/platformio-custom.py. Die System-Seiten zeigen dann eine Zeile "Dirty",
+ * sonst gar keine. Fallback fuer Builds ohne das Script. */
+#ifndef APP_DIRTY
+#define APP_DIRTY 0
+#endif
+
 #define MENU_NO_IDX 0xFFu     /* uint8-Index "keiner" */
 #define MENU_NO_TEXT 0xFFFFu  /* Pool-Offset "kein Text" */
 

@@ -214,6 +214,16 @@ try:
 except subprocess.CalledProcessError:
     repo_owner = "unknown"
 
+# Nicht eingecheckte Aenderungen an verfolgten Dateien. readprops.py rechnet
+# dasselbe aus, gibt es aber nicht weiter: der "-d"-Suffix am Versionsstring
+# ist dort auskommentiert, weil APP_VERSION in Protobufs landet. Als eigenes
+# Define stoert es dort nicht. "--quiet" liefert 1 bei Unterschieden; jeder
+# andere Ausgang (kein git, kein HEAD) gilt als sauber.
+try:
+    app_dirty = 1 if subprocess.call(["git", "diff", "--quiet", "HEAD"]) == 1 else 0
+except Exception:
+    app_dirty = 0
+
 jsonLoc = env["PROJECT_DIR"] + "/userPrefs.jsonc"
 with open(jsonLoc) as f:
     jsonStr = re.sub("//.*","", f.read(), flags=re.MULTILINE)
@@ -245,6 +255,7 @@ flags = [
         "-DAPP_ENV=" + env.get("PIOENV"),
         "-DAPP_REPO=" + repo_owner,
         "-DBUILD_EPOCH=" + str(build_epoch),
+        "-DAPP_DIRTY=" + str(app_dirty),
     ] + pref_flags
 
 print("Using flags:")

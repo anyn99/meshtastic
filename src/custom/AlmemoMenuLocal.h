@@ -59,6 +59,9 @@ class AlmemoMenuLocal
         VAL_SINCE,
         VAL_BATT,
         VAL_FIRMWARE,
+#if APP_DIRTY
+        VAL_DIRTY,
+#endif
         VAL_INTERVAL,
         VAL_PRESET,
         VAL_NEXT,    /* Sekunden bis zur naechsten Aktualisierung */
@@ -284,6 +287,9 @@ class AlmemoMenuLocal
     uint16_t offIdent     = MENU_NO_TEXT;
     uint16_t offVer       = MENU_NO_TEXT;
     uint16_t offFirmware  = MENU_NO_TEXT;
+#if APP_DIRTY
+    uint16_t offDirty     = MENU_NO_TEXT;
+#endif
 
     void setFixed(uint8_t idx, int32_t raw, int8_t exp)
     {
@@ -362,6 +368,9 @@ class AlmemoMenuLocal
         offIdent    = b.str(info.name && info.name[0] ? info.name : "-");
         offVer      = b.str(info.version && info.version[0] ? info.version : "-");
         offFirmware = b.str(optstr(APP_VERSION));
+#if APP_DIRTY
+        offDirty    = b.str("yes");
+#endif
 
         /* --- Auswahllisten: geteilt mit dem Receiver, s. AlmemoMenuSettings.h --- */
         const uint8_t enumInterval = menudef::intervalEnum(b);
@@ -435,6 +444,9 @@ class AlmemoMenuLocal
         b.page("SYSTEM", MenuPageKind::Status);
         b.item("Akku", VAL_BATT, "mV");
         b.item("Firmware", VAL_FIRMWARE);
+#if APP_DIRTY
+        b.item("Dirty", VAL_DIRTY);
+#endif
 
         /* --- Menue ZUERST anlegen, damit die Einstellungen-Seite seinen Index kennt.
          *     Die Karussell-Reihenfolge bleibt davon unberuehrt: nextStatusPage()
@@ -470,6 +482,9 @@ class AlmemoMenuLocal
         setTextOff(VAL_IDENT, offIdent);
         setTextOff(VAL_VER, offVer);
         setTextOff(VAL_FIRMWARE, offFirmware);
+#if APP_DIRTY
+        setTextOff(VAL_DIRTY, offDirty);
+#endif
         setTextOff(VAL_STATUS, offStatus[info.status < STATUS_COUNT ? info.status : 1]);
         setTextOff(VAL_CHANS, offChannels);
         vals[VAL_PACKETS].kind  = (uint8_t)MenuValueKind::Int;

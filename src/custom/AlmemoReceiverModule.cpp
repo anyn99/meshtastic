@@ -681,7 +681,8 @@ void I2CSlaveThread::onWrite(uint8_t addr, const uint8_t *buf, uint8_t len)
  *                  ("NNNN.M<c>.<v>"), KEIN Countdown -- wir senden nicht
  *   FUNK           ChUtil, AirUtilTX, Verbundene Nodes; kein Paketzaehler und
  *                  kein "Gesendet vor"
- *   SYSTEM         Typ, Kennung, Version, Firmware; es gibt keine Sensor-Seite
+ *   SYSTEM         Typ, Kennung, Version, Firmware (+ Dirty, s. APP_DIRTY);
+ *                  es gibt keine Sensor-Seite
  *   EINSTELLUNGEN  identisch zum Node (geteilte Listen, s. AlmemoMenuSettings.h)
  *
  * Reihenfolge ist wichtig, zweimal:
@@ -702,6 +703,9 @@ enum : uint8_t {
     VAL_IDENT,
     VAL_VER,
     VAL_FIRMWARE,
+#if APP_DIRTY
+    VAL_DIRTY,
+#endif
     VAL_PRESET,
     VAL_DISPLAY,        /* aktuelles Display; gefuellt vom Host */
     VAL_DISPLAY_TARGET, /* Ziel des Toggle-Items; gefuellt vom Host */
@@ -738,6 +742,9 @@ void I2CSlaveThread::buildMenu()
     offIdent    = b.str(ident[0] ? ident : "-");
     offVer      = b.str(verTrim[0] ? verTrim : "-");
     offFirmware = b.str(optstr(APP_VERSION));
+#if APP_DIRTY
+    offDirty    = b.str("yes");
+#endif
     /* "Typ" ist die ALMEMO-Generation, die wir emulieren -- aus der Version
      * abgeleitet, genau wie der Node es tut (6.xx = D6, 7.xx = D7). */
     offType = b.str(verTrim[0] == '7' ? "D7" : "D6");
@@ -802,6 +809,9 @@ void I2CSlaveThread::buildMenu()
     b.item("Kennung", VAL_IDENT);
     b.item("Version", VAL_VER);
     b.item("Firmware", VAL_FIRMWARE);
+#if APP_DIRTY
+    b.item("Dirty", VAL_DIRTY);
+#endif
 
     /* --- Einstellungen: identisch zum Node. Die Menueseite MUSS vor der
      *     Statusseite stehen, die sie als target referenziert. --- */
@@ -928,6 +938,9 @@ bool I2CSlaveThread::pollMenuValues()
     setText(VAL_IDENT, offIdent);
     setText(VAL_VER, offVer);
     setText(VAL_FIRMWARE, offFirmware);
+#if APP_DIRTY
+    setText(VAL_DIRTY, offDirty);
+#endif
 
     /* Einstellungen, aus derselben Config wie beim Node. */
     {
