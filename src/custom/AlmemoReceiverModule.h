@@ -145,6 +145,8 @@ class I2CSlaveThread : public concurrency::OSThread
     void    buildMenu();
     /** Laufende Werte fuer den Werteblock einsammeln. @return true bei Aenderung. */
     bool    pollMenuValues();
+    /** Eine Einstellung nach ihrer Bedeutung anwenden (MENU_SETTING_*). */
+    bool    applyMenuSetting(uint8_t setting, int32_t raw);
 
     /* Pool-Offsets der festen Menuetexte, in buildMenu() gefuellt. Der
      * Werteblock setzt daraus die Text-Werte, ohne sie ein zweites Mal
@@ -162,6 +164,12 @@ class I2CSlaveThread : public concurrency::OSThread
     static volatile uint8_t s_eeprom_ptr[2]; // current address pointer per EEPROM
     static volatile uint8_t s_reg_ptr;       // current register for 0x40
     static volatile uint16_t s_menu_ptr;     // 16-Bit-Offset im Menue-Fenster
+    /* Edit aus dem Menue-Kanal. In der ISR nur gemerkt, angewandt in runOnce():
+     * das Anwenden schreibt Config und ruft nodeDB->saveToDisk() -- nichts
+     * davon gehoert in einen Interrupt. */
+    static volatile bool     s_edit_pending;
+    static volatile uint8_t  s_edit_item;
+    static volatile int32_t  s_edit_raw;
     /* Kopf des Menue-Kanals, aus menu abgeleitet (s. buildMenu). */
     static MenuWireHeader   s_menu_hdr;
 

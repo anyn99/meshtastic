@@ -26,6 +26,7 @@
  *   0x0000   Kopf, 20 B (MenuWireHeader)
  *   0x0020   MenuStruct, roh, structSize Byte
  *   0x0800   Werteblock, valueCount * sizeof(MenuValue)
+ *   0x1000   Edit (nur schreibbar), s. ALMEMO_MENU_OFF_EDIT
  *
  * Pro Transaktion gehen maximal ALMEMO_MENU_CHUNK Byte -- begrenzt von beiden
  * Seiten: SERIAL_BUFFER_SIZE (Wire-RingBuffer des Nodes) und I2C_BB_MAX_BUF
@@ -71,6 +72,26 @@
 
 /* Maximale Nutzlast pro Lese-Transaktion, s. o. */
 #define ALMEMO_MENU_CHUNK 64u
+
+/*
+ * Edit-Fenster: NUR schreibbar, Lesen dort liefert nichts.
+ *
+ * Eine Aenderung ist ein Write von 7 Byte:
+ *
+ *   [0..1]  Zeiger = ALMEMO_MENU_OFF_EDIT, big endian (wie jeder Zugriff)
+ *   [2]     Item-Index im Menue des Eigentuemers
+ *   [3..6]  neuer Rohwert, int32 little endian
+ *
+ * Der Item-Index genuegt, weil der Eigentuemer aus seinem eigenen
+ * MenuItem::setting die Bedeutung ableitet. Das `targets`-Byte aus MenuEdit
+ * wandert NICHT mit: der Host wendet seinen Anteil selbst an und schickt nur
+ * den Anteil des Eigentuemers.
+ *
+ * Laenge und Zeiger zusammen machen den Edit von einem reinen Zeiger-Write (2
+ * Byte) unterscheidbar -- der Slave braucht also keinen Modus.
+ */
+#define ALMEMO_MENU_OFF_EDIT 0x1000u
+#define ALMEMO_MENU_EDIT_LEN 7u
 
 /**
  * Kopf des Menue-Kanals, 20 Byte, little endian, ohne implizites Padding.

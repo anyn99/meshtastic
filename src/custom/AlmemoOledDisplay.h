@@ -32,9 +32,10 @@
  * bleiben unberuehrt. Laut Konzept gilt: aufgesteckt = Display gehoert
  * ausschliesslich dem Receiver, zum Bedienen des Nodes wird er abgezogen.
  *
- * Noch nicht moeglich sind AENDERUNGEN am Receiver-Menue: dafuer fehlt der
- * Rueckweg (Edit als Write auf den Menue-Kanal). applyEdit() loggt das, statt
- * es stillschweigend zu verwerfen.
+ * Aenderungen am Receiver-Menue gehen als Write auf den Menue-Kanal zurueck
+ * (s. ALMEMO_MENU_OFF_EDIT). Weil dann zwei Geraete im Spiel sind, bietet der
+ * Confirm-Dialog dort "Auf beide anwenden" an -- der Receiver bekommt seinen
+ * Anteil per I2C, der Node wendet denselben MENU_SETTING_* selbst an.
  *
  * ---------------------------------------------------------------------------
  * WICHTIG, I2C-Bustakt: Das Display haengt am selben Bus (globales `Wire`) wie
@@ -237,27 +238,33 @@ class AlmemoOledThread : public concurrency::OSThread
     }
     const MenuValue *activeValues() const { return remoteActive() ? remote.values() : local.values(); }
 
-    /** Eine Aenderung an die aktive Quelle geben. */
+    /** Eine Aenderung an die zustaendige Stelle geben. */
     void applyEdit(const MenuEdit &edit)
     {
+        const MenuStruct *s = activeStruct();
+        if (!s || edit.item >= s->itemCount)
+            return;
+
         /* Aktionen fuehrt immer das Geraet mit dem Display aus, egal aus welchem
          * Menue sie kommen -- sie gehen also NICHT an die Quelle. */
-        const MenuStruct *s = activeStruct();
-        if (s && edit.item < s->itemCount && (MenuItemKind)s->items[edit.item].kind == MenuItemKind::Action) {
+        if ((MenuItemKind)s->items[edit.item].kind == MenuItemKind::Action) {
             runMenuAction((uint8_t)edit.raw);
             return;
         }
 
+        /* Eigenes Menue: nichts zu verteilen. */
         if (!remoteActive()) {
             local.apply(edit);
             return;
         }
-        /* Noch kein Rueckweg: Edits muessten als Write auf den Menue-Kanal
-         * gehen (itemIdx + raw, s. AlmemoMenuWire.h), und dafuer fehlt die
-         * Gegenseite im Receiver. Bis dahin NICHT stillschweigend verwerfen --
-         * sonst sieht es wie ein Bedienfehler aus. */
-        LOG_WARN("AlmemoOled: Aenderung am Receiver-Menue noch nicht moeglich (Item %u, raw %ld)",
-                 (unsigned)edit.item, (long)edit.raw);
+
+        /* Receiver-Menue: SELF ist der Receiver (Eigentuemer des Menues), HOST
+         * sind wir. Die Bedeutung kommt aus seinem Item, damit wir dieselbe
+         * Einstellung treffen und nicht denselben Index -- s. MENU_SETTING_*. */
+        if (edit.targets & MENU_TARGET_SELF)
+            remote.apply(edit);
+        if (edit.targets & MENU_TARGET_HOST)
+            local.applySetting(s->items[edit.item].setting, edit.raw);
     }
 
     /** MENU_ACTION_* ausfuehren. */
@@ -286,6 +293,10 @@ class AlmemoOledThread : public concurrency::OSThread
         const MenuStruct *s = activeStruct();
         if (!s)
             return;
+        /* "Auf beide anwenden" nur anbieten, wenn das angezeigte Menue dem
+         * Receiver gehoert -- dann gibt es ueberhaupt ein zweites Geraet. Muss
+         * VOR dem Controller stehen, der daraus die Confirm-Aktionen baut. */
+        state.offerBoth = remoteActive();
         MenuEdit edit{};
         if (MenuController::shortPress(*s, activeValues(), state, edit))
             applyEdit(edit);
@@ -297,6 +308,7 @@ class AlmemoOledThread : public concurrency::OSThread
         const MenuStruct *s = activeStruct();
         if (!s)
             return;
+        state.offerBoth = remoteActive(); /* s. onShort() */
         MenuEdit edit{};
         if (MenuController::longPress(*s, activeValues(), state, edit))
             applyEdit(edit);

@@ -99,6 +99,38 @@ class AlmemoMenuRemote
         return changed;
     }
 
+    /**
+     * Eine Aenderung an den Receiver schicken (s. ALMEMO_MENU_OFF_EDIT).
+     *
+     * Uebertragen wird nur Item-Index und Rohwert -- die Bedeutung leitet der
+     * Receiver aus seinem eigenen MenuItem::setting ab. Das targets-Byte bleibt
+     * hier: unseren Anteil wenden wir selbst an.
+     */
+    bool apply(const MenuEdit &e)
+    {
+        almemoI2cClockGuard();
+
+        const uint8_t pkt[ALMEMO_MENU_EDIT_LEN] = {
+            (uint8_t)(ALMEMO_MENU_OFF_EDIT >> 8),
+            (uint8_t)(ALMEMO_MENU_OFF_EDIT & 0xFF),
+            e.item,
+            (uint8_t)((uint32_t)e.raw & 0xFF),
+            (uint8_t)(((uint32_t)e.raw >> 8) & 0xFF),
+            (uint8_t)(((uint32_t)e.raw >> 16) & 0xFF),
+            (uint8_t)(((uint32_t)e.raw >> 24) & 0xFF),
+        };
+
+        Wire.beginTransmission(ALMEMO_MENU_I2C_ADDR);
+        Wire.write(pkt, sizeof(pkt));
+        if (Wire.endTransmission() != 0) {
+            LOG_WARN("AlmemoMenuRemote: Edit nicht angekommen (Item %u, raw %ld)", (unsigned)e.item, (long)e.raw);
+            return false;
+        }
+        /* Der Receiver baut sein Menue nach dem Anwenden neu -- der naechste
+         * poll() sieht den neuen Hash und holt es. */
+        return true;
+    }
+
   private:
     /**
      * Struktur holen und gegen ihren eigenen Hash pruefen.

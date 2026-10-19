@@ -205,6 +205,9 @@ void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
 volatile uint8_t  I2CSlaveThread::s_eeprom_ptr[2]  = {0, 0};
 volatile uint8_t  I2CSlaveThread::s_reg_ptr         = 0;
 volatile uint16_t I2CSlaveThread::s_menu_ptr        = 0;
+volatile bool     I2CSlaveThread::s_edit_pending    = false;
+volatile uint8_t  I2CSlaveThread::s_edit_item       = 0;
+volatile int32_t  I2CSlaveThread::s_edit_raw        = 0;
 MenuWireHeader    I2CSlaveThread::s_menu_hdr        = {};
 I2CSlaveThread   *I2CSlaveThread::s_instance        = nullptr;
 volatile bool     I2CSlaveThread::s_write_pending   = false;
@@ -466,6 +469,24 @@ int32_t I2CSlaveThread::runOnce()
             LOG_DEBUG("AlmemoRx: rescan skipped, past %lums startup window", (unsigned long)ALMEMO_RX_MUTE_WINDOW_MS);
     }
 
+    /* Edit aus dem Menue-Kanal abarbeiten (die ISR hat ihn nur abgelegt). Die
+     * Bedeutung steht im eigenen Menue -- der Host schickt nur den Index. */
+    if (s_edit_pending) {
+        NVIC_DisableIRQ(GPIOTE_IRQn);
+        const uint8_t it  = s_edit_item;
+        const int32_t raw = s_edit_raw;
+        s_edit_pending    = false;
+        NVIC_EnableIRQ(GPIOTE_IRQn);
+
+        if (it < menu.itemCount) {
+            if (applyMenuSetting(menu.items[it].setting, raw))
+                buildMenu(); /* Preset-Text aendert sich -> neuer Hash, Node holt neu */
+        } else {
+            LOG_WARN("I2CSlave: Edit auf Item %u ausserhalb des Menues (%u Items)", (unsigned)it,
+                     (unsigned)menu.itemCount);
+        }
+    }
+
     /* Laufende Menuewerte einsammeln. Billig (kein Bus-Zugriff) und nur aus
      * diesem Task -- die ISR liest menuVals, kann dabei aber hoechstens einen
      * halb aktualisierten Werteblock ausliefern. Das ist unkritisch: Werte sind
@@ -639,8 +660,16 @@ void I2CSlaveThread::onWrite(uint8_t addr, const uint8_t *buf, uint8_t len)
         /* 16-Bit-Adresszeiger, big endian (hi zuerst) -- die Struktur ist rund
          * 1,5 kB, ein Byte wuerde nicht reichen. Edits (itemIdx + raw) kommen
          * spaeter als laengerer Write dazu; bis dahin alles andere verwerfen. */
-        if (len == 2)
+        if (len == 2) {
             s_menu_ptr = (uint16_t)((buf[0] << 8) | buf[1]);
+        } else if (len == ALMEMO_MENU_EDIT_LEN &&
+                   (uint16_t)((buf[0] << 8) | buf[1]) == ALMEMO_MENU_OFF_EDIT) {
+            /* Nur merken -- angewandt wird im Task, s. runOnce(). */
+            s_edit_item    = buf[2];
+            s_edit_raw     = (int32_t)((uint32_t)buf[3] | ((uint32_t)buf[4] << 8) |
+                                       ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 24));
+            s_edit_pending = true;
+        }
     }
 }
 
@@ -779,7 +808,7 @@ void I2CSlaveThread::buildMenu()
     const uint8_t pageMenu = menu.pageCount;
     b.page("EINSTELL.", MenuPageKind::Menu);
     b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
-           config.lora.use_preset ? 0 : MENU_ITEM_DISABLED);
+           config.lora.use_preset ? 0 : MENU_ITEM_DISABLED, MENU_SETTING_PRESET);
     b.item("-> Node-Display", MENU_NO_IDX, nullptr, MenuItemKind::Action, MENU_ACTION_SWAP_DISPLAY);
     b.item("<- Zurück", MENU_NO_IDX, nullptr, MenuItemKind::Back);
 
@@ -809,6 +838,29 @@ void I2CSlaveThread::buildMenu()
     LOG_INFO("I2CSlave: Menue gebaut (%u Seiten, %u Items, %u Werte, %u Pool, %u B, hash %08lx)", menu.pageCount,
              menu.itemCount, menu.valueCount, menu.poolLen, (unsigned)sizeof(MenuStruct),
              (unsigned long)menu.hash);
+}
+
+/* -------------------------------------------------------------------------
+ * applyMenuSetting — eine Einstellung nach ihrer Bedeutung anwenden
+ *
+ * Gegenstueck zu AlmemoMenuLocal::applySetting(). Identifiziert wird ueber
+ * MENU_SETTING_*, nicht ueber den Item-Index -- der gilt nur im eigenen Menue.
+ * ---------------------------------------------------------------------- */
+
+bool I2CSlaveThread::applyMenuSetting(uint8_t setting, int32_t raw)
+{
+    switch (setting) {
+    case MENU_SETTING_PRESET:
+        config.lora.modem_preset = (meshtastic_Config_LoRaConfig_ModemPreset)raw;
+        config.lora.use_preset   = true;
+        nodeDB->saveToDisk(SEGMENT_CONFIG);
+        LOG_INFO("I2CSlave: Preset -> %s",
+                 DisplayFormatters::getModemPresetDisplayName(config.lora.modem_preset, false, true));
+        return true;
+    default:
+        LOG_WARN("I2CSlave: Einstellung %u nicht unterstuetzt", (unsigned)setting);
+        return false;
+    }
 }
 
 /* -------------------------------------------------------------------------
