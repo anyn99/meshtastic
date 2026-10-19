@@ -1,5 +1,7 @@
 #if defined(ALMEMO_SENSOR_RECEIVER)
 #include "AlmemoReceiverModule.h"
+#include "AlmemoMenuSettings.h"
+#include "airtime.h"
 #include "configuration.h"
 
 extern "C" {
@@ -202,7 +204,7 @@ void I2CSlaveThread::writeReg(uint8_t reg, const uint8_t data[REG_MAX])
 
 volatile uint8_t  I2CSlaveThread::s_eeprom_ptr[2]  = {0, 0};
 volatile uint8_t  I2CSlaveThread::s_reg_ptr         = 0;
-volatile uint8_t  I2CSlaveThread::s_menu_ptr        = 0;
+volatile uint16_t I2CSlaveThread::s_menu_ptr        = 0;
 MenuWireHeader    I2CSlaveThread::s_menu_hdr        = {};
 I2CSlaveThread   *I2CSlaveThread::s_instance        = nullptr;
 volatile bool     I2CSlaveThread::s_write_pending   = false;
@@ -246,16 +248,11 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
      * nur anzeigen oder gegen eine Typentabelle pruefen, ist unklar: vorher
      * stand hier "FHAD46  ", die Kennung eines echten Ahlborn-Fuehlers. Falls
      * ein Logger den Fuehler nicht mehr annimmt, ist das der erste Verdacht. */
-    /* Menue-Kanal: vorerst NUR der Kopf, mit Magic und Modellversion. Der Node
-     * erkennt daran, dass hier ein Receiver und kein ALMEMO-Fuehler steckt
-     * (Andock-Kennung, s. AlmemoMenuWire.h). Alle Zaehler und der Hash bleiben
-     * 0, bis die Struktur wirklich uebertragen wird -- der Node darf daraus
-     * also noch keine Struktur ableiten. */
-    s_menu_hdr.magic        = ALMEMO_MENU_MAGIC;
-    s_menu_hdr.modelVersion = ALMEMO_MENU_MODEL_VERSION;
-
     memcpy(&eeprom[0][0x00], "LORA-GW ", 8);
     strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
+
+    /* Braucht Kennung und Version aus dem EEPROM, also NACH deren Initialisierung. */
+    buildMenu();
 
     /* All slots start empty; first packet from each node populates one. */
     for (uint8_t i = 0; i < MAX_SLOTS; i++)
@@ -424,6 +421,8 @@ void I2CSlaveThread::onValue(uint32_t node_id, uint8_t sub, const char unit[2], 
 
     /* Update (or first-write) the live value; the slot keeps it until the next
      * value arrives — no expiration. */
+    slots[slot].raw      = raw;
+    slots[slot].exponent = exponent;
     writeRawForSlot(slot, raw);
 }
 
@@ -445,6 +444,20 @@ int32_t I2CSlaveThread::runOnce()
             unmuteI2C(); // window over → audible again
     } else if (rescanRequested) {
         rescanRequested = false;
+
+        /* Slot-Tabelle hat sich geaendert -> Menuestruktur neu bauen: die
+         * Messwert-Labels kommen aus slots[], und der neue Hash sagt dem Node,
+         * dass er die Struktur neu holen muss.
+         *
+         * BEWUSST OHNE NVIC_DisableIRQ: die ISR liefert Bloecke direkt aus menu
+         * aus, ein Rebuild mittendrin schickt also eine zerrissene Struktur
+         * raus. Das faengt der Hash ab -- der Node prueft die geholte Struktur
+         * dagegen und holt bei Abweichung erneut, und dann ist sie stabil.
+         * IRQs zu sperren waere das groessere Risiko: der Rebuild dauert ~1 ms,
+         * und in der Zeit wuerden wir auch den Logger nicht hoeren, der 0x50
+         * regelmaessig zur Steckerkennung pollt. */
+        buildMenu();
+
         /* Only mute within the master's startup window; later the master won't
          * re-enumerate anyway, so a mute would just disrupt the bus for nothing. */
         if (millis() < ALMEMO_RX_MUTE_WINDOW_MS)
@@ -452,6 +465,13 @@ int32_t I2CSlaveThread::runOnce()
         else
             LOG_DEBUG("AlmemoRx: rescan skipped, past %lums startup window", (unsigned long)ALMEMO_RX_MUTE_WINDOW_MS);
     }
+
+    /* Laufende Menuewerte einsammeln. Billig (kein Bus-Zugriff) und nur aus
+     * diesem Task -- die ISR liest menuVals, kann dabei aber hoechstens einen
+     * halb aktualisierten Werteblock ausliefern. Das ist unkritisch: Werte sind
+     * ohnehin Momentaufnahmen, und der naechste Abruf korrigiert es. Fuer die
+     * Struktur gilt das nicht, dort haengt die Konsistenz am Hash. */
+    pollMenuValues();
 
     /* Stats log, throttled to ~5s independently of the runOnce cadence.
      * Single concise line for the common case.  Anomalies (timeouts, addr
@@ -512,17 +532,21 @@ int32_t I2CSlaveThread::runOnce()
         if (rd_edge > 0) {
             LOG_WARN("I2CSlave read_edge_loss: %lu (ST_READ_LAST_BIT falling-edge recovery)", rd_edge);
         }
-        /* ack/wr-Invariant: jedes empfangene Byte wird quittiert, also ack == wr
-         * (±1 fuer eine zum Logzeitpunkt laufende Transaktion).
+        /* Invariant: jede committete Write-Transaktion hat mindestens ihr erstes
+         * Datenbyte quittiert, also acks >= writes. Weniger ACKs als
+         * Transaktionen waere eine echte Anomalie.
          *
-         * wr == rd wird NICHT mehr geprueft. Das galt, solange jeder Zyklus
-         * strikt W-then-R war; der Master macht aber Writes ohne folgenden Read
-         * (Wake-up-/Adress-Probes zur Steckerkennung), die Differenz ist also
-         * normal. Gemessen 8,1 Writes zu 6,3 Reads pro Probe-Zyklus -- stabil,
-         * nichts driftete, die Warnung war reines Rauschen. */
-        int32_t ack_skew = (int32_t)acks - (int32_t)writes;
-        if (ack_skew < -1 || ack_skew > 1) {
-            LOG_WARN("I2CSlave ack skew: wr=%lu rd=%lu ack=%lu", writes, reads, acks);
+         * NICHT geprueft wird Gleichheit. writes zaehlt TRANSAKTIONEN,
+         * acks_sent zaehlt BYTES (so dokumentiert in i2c_bb_slave.h) -- gleich
+         * sind sie nur, solange jeder Write genau ein Byte traegt. Das galt fuer
+         * die alten 1-Byte-Adresszeiger und ist mit dem 16-Bit-Zeiger des
+         * Menue-Kanals hinfaellig: dort kommen 2 Byte pro Transaktion, und
+         * acks waechst entsprechend doppelt so schnell.
+         *
+         * Ebenso nicht geprueft: wr == rd. Der Master macht Writes ohne
+         * folgenden Read (Adress-Probes zur Steckerkennung). */
+        if (acks < writes) {
+            LOG_WARN("I2CSlave ack deficit: wr=%lu rd=%lu ack=%lu", writes, reads, acks);
         }
     }
 
@@ -612,12 +636,249 @@ void I2CSlaveThread::onWrite(uint8_t addr, const uint8_t *buf, uint8_t len)
         if (buf[0] < REG_COUNT)
             s_reg_ptr = buf[0];
     } else if (addr == ALMEMO_MENU_I2C_ADDR) {
-        /* Nur der Adresszeiger ins Lesefenster. Edits (itemIdx + raw) kommen
-         * spaeter als laengerer Write dazu; bis dahin alles > 1 Byte verwerfen,
-         * wie bei den EEPROM-Adressen auch. */
-        if (len == 1)
-            s_menu_ptr = buf[0];
+        /* 16-Bit-Adresszeiger, big endian (hi zuerst) -- die Struktur ist rund
+         * 1,5 kB, ein Byte wuerde nicht reichen. Edits (itemIdx + raw) kommen
+         * spaeter als laengerer Write dazu; bis dahin alles andere verwerfen. */
+        if (len == 2)
+            s_menu_ptr = (uint16_t)((buf[0] << 8) | buf[1]);
     }
+}
+
+/* -------------------------------------------------------------------------
+ * buildMenu — eigene Menuestruktur fuer den Menue-Kanal
+ *
+ * Aufbau wie beim Node, mit den Abweichungen aus dem Menuekonzept:
+ *   MESSWERTE      je belegtem Slot eine Zeile, Label wie im Logger-Kommentar
+ *                  ("NNNN.M<c>.<v>"), KEIN Countdown -- wir senden nicht
+ *   FUNK           ChUtil, AirUtilTX, Verbundene Nodes; kein Paketzaehler und
+ *                  kein "Gesendet vor"
+ *   SYSTEM         Typ, Kennung, Version, Firmware; es gibt keine Sensor-Seite
+ *   EINSTELLUNGEN  identisch zum Node (geteilte Listen, s. AlmemoMenuSettings.h)
+ *
+ * Reihenfolge ist wichtig, zweimal:
+ *   - ALLE Pool-Texte muessen vor finish() eingetragen sein, sonst deckt der
+ *     Hash sie nicht ab.
+ *   - Die Menueseite muss vor der Statusseite stehen, die sie als target
+ *     referenziert.
+ * ---------------------------------------------------------------------- */
+
+/* Wert-Indizes des Receiver-Menues. Die Messwerte liegen vorn, danach die
+ * festen Felder -- so wie beim Node, damit beide Seiten gleich zu lesen sind. */
+enum : uint8_t {
+    VAL_MEAS0 = 0,
+    VAL_CHUTIL = VAL_MEAS0 + I2CSlaveThread::MAX_SLOTS,
+    VAL_AIRUTIL,
+    VAL_NODES,
+    VAL_TYPE,
+    VAL_IDENT,
+    VAL_VER,
+    VAL_FIRMWARE,
+    VAL_PRESET,
+    VAL_MENU_COUNT,
+};
+
+void I2CSlaveThread::buildMenu()
+{
+    MenuBuilder b(menu);
+
+    /* Kennung und Version aus dem EEPROM, damit Node und Logger dasselbe
+     * sehen; ALMEMO fuellt die Felder mit Leerzeichen auf. */
+    char ident[9], ver[9];
+    memcpy(ident, &eeprom[0][0x00], 8);
+    memcpy(ver, &eeprom[0][0xF8], 8);
+    ident[8] = ver[8] = '\0';
+    for (int i = 7; i >= 0 && ident[i] == ' '; i--)
+        ident[i] = '\0';
+    const char *verTrim = ver;
+    while (*verTrim == ' ')
+        verTrim++;
+
+    /* Kopfzeile links, wie beim Node die vier Hex-Stellen der Node-Nummer --
+     * hier mit Praefix, damit man dem Display ansieht, wessen Menue es zeigt.
+     * KURZ halten: header() zeichnet links bei x=0 und den Seitentitel
+     * rechtsbuendig bei x=127, ohne Kollisionsschutz. "GW" + 4 Stellen braucht
+     * ~42 px, der breiteste Titel ("MESSWERTE 1/2") ~78 px -- das passt auf
+     * 128 px. Mit "LoRa-GW" davor waere es ~66 px und wuerde ueberlappen. */
+    char head[16];
+    snprintf(head, sizeof(head), "GW %04X", (unsigned)(nodeDB ? (nodeDB->getNodeNum() & 0xFFFF) : 0));
+    b.deviceName(head);
+
+    /* Texte vorab in den Pool -- nach finish() darf nichts mehr dazu. */
+    offIdent    = b.str(ident[0] ? ident : "-");
+    offVer      = b.str(verTrim[0] ? verTrim : "-");
+    offFirmware = b.str(optstr(APP_VERSION_SHORT));
+    /* "Typ" ist die ALMEMO-Generation, die wir emulieren -- aus der Version
+     * abgeleitet, genau wie der Node es tut (6.xx = D6, 7.xx = D7). */
+    offType = b.str(verTrim[0] == '7' ? "D7" : "D6");
+
+    /* Messwert-Labels: Node-Kurzname + Messstelle, dasselbe Format wie im
+     * Kommentarfeld des Loggers (s. initSlotForNode) -- "NNNN.M<c>.<v>" bzw.
+     * "NNNN.<v>" bei Kanal 0. So zeigen Display und Logger dieselbe Bezeichnung. */
+    char lbl[MAX_SLOTS][14];
+    uint8_t used[MAX_SLOTS];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < MAX_SLOTS; i++) {
+        if (!slots[i].in_use)
+            continue;
+        const unsigned node16  = (unsigned)(slots[i].node_id & 0xFFFF);
+        const uint8_t  channel = almemoSlotChannel(slots[i].sub);
+        const uint8_t  valIdx  = almemoSlotValueIndex(slots[i].sub);
+        if (channel == 0)
+            snprintf(lbl[n], sizeof(lbl[0]), "%04X.%u", node16, valIdx);
+        else
+            snprintf(lbl[n], sizeof(lbl[0]), "%04X.M%u.%u", node16, channel - 1, valIdx);
+        used[n++] = i;
+    }
+
+    /* --- Auswahllisten: geteilt mit dem Node, s. AlmemoMenuSettings.h.
+     *     OHNE Intervall: der Receiver sendet keine ALMEMO-Pakete, ein
+     *     Sendeintervall hat hier keine Bedeutung. --- */
+    const uint8_t enumPreset = menudef::presetEnum(b, offPreset);
+
+    /* --- Messwerte. Kein Countdown wie beim Node: der Receiver sendet nicht,
+     *     er empfaengt -- es gibt also keine "naechste Aktualisierung". --- */
+    const uint8_t pages = n ? (uint8_t)((n + MENU_ROWS - 1) / MENU_ROWS) : 1;
+    char title[20];
+    for (uint8_t pg = 0; pg < pages; pg++) {
+        if (pages > 1)
+            snprintf(title, sizeof(title), "MESSWERTE %u/%u", (unsigned)(pg + 1), (unsigned)pages);
+        else
+            snprintf(title, sizeof(title), "MESSWERTE");
+        b.page(title, MenuPageKind::Status);
+        if (!n) {
+            b.item("Keine Messstellen", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+            continue;
+        }
+        for (uint8_t r = 0; r < MENU_ROWS; r++) {
+            const uint8_t i = (uint8_t)(pg * MENU_ROWS + r);
+            if (i >= n)
+                break;
+            b.item(lbl[i], (uint8_t)(VAL_MEAS0 + used[i]));
+        }
+    }
+
+    /* --- Funk. Kein "Pakete" und kein "Gesendet vor" -- der Receiver sendet
+     *     nicht; dafuer die Zahl der Nodes, von denen Pakete kamen. --- */
+    b.page("FUNK", MenuPageKind::Status);
+    b.item("ChUtil", VAL_CHUTIL, "%");
+    b.item("AirUtilTX", VAL_AIRUTIL, "%");
+    b.item("Verbundene Nodes", VAL_NODES);
+
+    /* --- System: beim Receiver umfangreicher, es gibt keine Sensor-Seite. --- */
+    b.page("SYSTEM", MenuPageKind::Status);
+    b.item("Typ", VAL_TYPE);
+    b.item("Kennung", VAL_IDENT);
+    b.item("Version", VAL_VER);
+    b.item("Firmware", VAL_FIRMWARE);
+
+    /* --- Einstellungen: identisch zum Node. Die Menueseite MUSS vor der
+     *     Statusseite stehen, die sie als target referenziert. --- */
+    /* Titel gekuerzt: links steht "GW XXXX", und mit "EINSTELLUNGEN" rechts
+     * ueberschneiden sich beide in der Mitte -- header() zeichnet ohne
+     * Kollisionsschutz. */
+    const uint8_t pageMenu = menu.pageCount;
+    b.page("EINSTELL.", MenuPageKind::Menu);
+    b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
+           config.lora.use_preset ? 0 : MENU_ITEM_DISABLED);
+    b.item("-> Node-Display", MENU_NO_IDX, nullptr, MenuItemKind::Action, MENU_ACTION_SWAP_DISPLAY);
+    b.item("<- Zurück", MENU_NO_IDX, nullptr, MenuItemKind::Back);
+
+    b.page("EINSTELL.", MenuPageKind::Status, MENU_PAGE_OPENS_MENU, pageMenu);
+    b.item("Preset", VAL_PRESET);
+    b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+    b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+    b.item("Lang drücken: ändern", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+
+    b.finish(); /* ab hier NICHTS mehr in den Pool legen -- der Hash ist gebildet */
+
+    /* Die Werte selbst gehen noch nicht ueber den Bus; der Werteblock
+     * (ALMEMO_MENU_OFF_VALUES) ist der naechste Schritt. Die Offsets der festen
+     * Texte stehen aber schon fest und liegen im Pool. */
+    s_menu_hdr.magic        = ALMEMO_MENU_MAGIC;
+    s_menu_hdr.modelVersion = ALMEMO_MENU_MODEL_VERSION;
+    s_menu_hdr.pageCount    = menu.pageCount;
+    s_menu_hdr.itemCount    = menu.itemCount;
+    s_menu_hdr.valueCount   = menu.valueCount;
+    s_menu_hdr.enumCount    = menu.enumCount;
+    s_menu_hdr.optionCount  = menu.optionCount;
+    s_menu_hdr.numberCount  = menu.numberCount;
+    s_menu_hdr.poolLen      = menu.poolLen;
+    s_menu_hdr.structSize   = (uint16_t)sizeof(MenuStruct);
+    s_menu_hdr.hash         = menu.hash;
+
+    LOG_INFO("I2CSlave: Menue gebaut (%u Seiten, %u Items, %u Werte, %u Pool, %u B, hash %08lx)", menu.pageCount,
+             menu.itemCount, menu.valueCount, menu.poolLen, (unsigned)sizeof(MenuStruct),
+             (unsigned long)menu.hash);
+}
+
+/* -------------------------------------------------------------------------
+ * pollMenuValues — laufende Werte fuer den Werteblock
+ *
+ * Gegenstueck zu AlmemoMenuLocal::poll() auf der Node-Seite, mit denselben
+ * Quellen (airTime, config) -- damit beide Geraete dieselben Zahlen zeigen.
+ * Laeuft aus runOnce(), nicht aus der ISR.
+ * ---------------------------------------------------------------------- */
+
+bool I2CSlaveThread::pollMenuValues()
+{
+    MenuValue before[MENU_MAX_VALUES];
+    memcpy(before, menuVals, sizeof(before));
+
+    auto setFixed = [this](uint8_t idx, int32_t raw, int8_t exp) {
+        menuVals[idx].kind     = (uint8_t)MenuValueKind::Fixed;
+        menuVals[idx].raw      = raw;
+        menuVals[idx].exponent = exp;
+    };
+    auto setText = [this](uint8_t idx, uint16_t off) {
+        menuVals[idx].kind = (uint8_t)MenuValueKind::Text;
+        menuVals[idx].text = off;
+    };
+
+    /* Messwerte je Slot. Ein nie befuellter Slot zeigt "----" (Invalid) statt 0. */
+    uint8_t  nodeCount = 0;
+    uint32_t seen[MAX_SLOTS];
+    for (uint8_t i = 0; i < MAX_SLOTS; i++) {
+        if (!slots[i].in_use) {
+            menuVals[VAL_MEAS0 + i].kind = (uint8_t)MenuValueKind::Invalid;
+            continue;
+        }
+        setFixed((uint8_t)(VAL_MEAS0 + i), slots[i].raw, slots[i].exponent);
+
+        /* "Verbundene Nodes" zaehlt Absender, nicht Messstellen: mehrere Slots
+         * desselben Nodes zaehlen einmal. */
+        bool known = false;
+        for (uint8_t k = 0; k < nodeCount; k++)
+            if (seen[k] == slots[i].node_id) {
+                known = true;
+                break;
+            }
+        if (!known)
+            seen[nodeCount++] = slots[i].node_id;
+    }
+
+    menuVals[VAL_NODES].kind = (uint8_t)MenuValueKind::Int;
+    menuVals[VAL_NODES].raw  = nodeCount;
+
+    if (airTime) {
+        setFixed(VAL_CHUTIL, (int32_t)(airTime->channelUtilizationPercent() * 10.0f), -1);
+        setFixed(VAL_AIRUTIL, (int32_t)(airTime->utilizationTXPercent() * 10.0f), -1);
+    }
+
+    /* Feste Texte: Offsets stehen seit buildMenu() im Pool. */
+    setText(VAL_TYPE, offType);
+    setText(VAL_IDENT, offIdent);
+    setText(VAL_VER, offVer);
+    setText(VAL_FIRMWARE, offFirmware);
+
+    /* Einstellungen, aus derselben Config wie beim Node. */
+    {
+        const uint8_t p = (uint8_t)config.lora.modem_preset;
+        menuVals[VAL_PRESET].kind = (uint8_t)MenuValueKind::Text;
+        menuVals[VAL_PRESET].text = (p < 16 && offPreset[p]) ? offPreset[p] : MENU_NO_TEXT;
+        menuVals[VAL_PRESET].raw  = (int32_t)config.lora.modem_preset;
+    }
+
+    return memcmp(before, menuVals, sizeof(before)) != 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -637,17 +898,34 @@ uint8_t I2CSlaveThread::onRead(uint8_t addr, uint8_t *buf, uint8_t max_len)
         }
         return len;
     } else if (addr == ALMEMO_MENU_I2C_ADDR) {
-        /* Vorerst nur das Kopffenster. Lesen ausserhalb liefert nichts, bis
-         * Struktur und Werte da sind -- der Master sieht dann NACK und weiss,
-         * dass es nichts zu holen gibt. */
-        const uint8_t *src = (const uint8_t *)&s_menu_hdr;
-        if (s_menu_ptr >= sizeof(s_menu_hdr))
+        /* Flaches Fenster, s. AlmemoMenuWire.h: Kopf bei 0x0000, Struktur bei
+         * 0x0020. Der Werteblock (0x0800) kommt noch nicht -- Lesen dort
+         * liefert 0, der Master sieht NACK und weiss, dass nichts da ist. */
+        const uint8_t *src = nullptr;
+        uint16_t       rem = 0;
+
+        if (s_menu_ptr < ALMEMO_MENU_OFF_HEADER + sizeof(s_menu_hdr)) {
+            const uint16_t off = (uint16_t)(s_menu_ptr - ALMEMO_MENU_OFF_HEADER);
+            src                = (const uint8_t *)&s_menu_hdr + off;
+            rem                = (uint16_t)(sizeof(s_menu_hdr) - off);
+        } else if (s_menu_ptr >= ALMEMO_MENU_OFF_STRUCT &&
+                   s_menu_ptr < ALMEMO_MENU_OFF_STRUCT + sizeof(MenuStruct)) {
+            const uint16_t off = (uint16_t)(s_menu_ptr - ALMEMO_MENU_OFF_STRUCT);
+            src                = (const uint8_t *)&s_instance->menu + off;
+            rem                = (uint16_t)(sizeof(MenuStruct) - off);
+        } else if (s_menu_ptr >= ALMEMO_MENU_OFF_VALUES &&
+                   s_menu_ptr < ALMEMO_MENU_OFF_VALUES + sizeof(s_instance->menuVals)) {
+            const uint16_t off = (uint16_t)(s_menu_ptr - ALMEMO_MENU_OFF_VALUES);
+            src                = (const uint8_t *)s_instance->menuVals + off;
+            rem                = (uint16_t)(sizeof(s_instance->menuVals) - off);
+        } else {
             return 0;
-        uint8_t len = (uint8_t)(sizeof(s_menu_hdr) - s_menu_ptr);
-        if (len > max_len)
-            len = max_len;
+        }
+
+        uint8_t len = rem > max_len ? max_len : (uint8_t)rem;
         for (uint8_t i = 0; i < len; i++)
-            buf[i] = src[s_menu_ptr++];
+            buf[i] = src[i];
+        s_menu_ptr = (uint16_t)(s_menu_ptr + len);
         return len;
     } else if (addr == 0x40) {
         if (s_reg_ptr >= REG_COUNT)

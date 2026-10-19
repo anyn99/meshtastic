@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AlmemoCommon.h"
+#include "AlmemoMenu.h"
 #include "AlmemoMenuWire.h"
 #include "concurrency/OSThread.h"
 #include "mesh/SinglePortModule.h"
@@ -79,6 +80,16 @@ class I2CSlaveThread : public concurrency::OSThread
     /* EEPROM contents — index 0 = 0x50, index 1 = 0x51 */
     uint8_t eeprom[2][EEPROM_SIZE];
 
+    /* Eigene Menuestruktur, roh ueber den Menue-Kanal ausgeliefert. Gebaut mit
+     * demselben MenuBuilder wie beim Node -- moeglich, seit das Modell
+     * displayfrei ist (921c4a394). */
+    MenuStruct menu{};
+
+    /* Werteblock des Menue-Kanals. MENU_MAX_VALUES statt der VAL_*-Zahl aus dem
+     * .cpp, damit der Header nichts davon wissen muss; ausgeliefert werden nur
+     * die ersten menu.valueCount Eintraege. */
+    MenuValue menuVals[MENU_MAX_VALUES]{};
+
     /* Register device (0x40) — reg[i] holds the latest temp for slots[i] */
     uint8_t reg_data[REG_COUNT][REG_MAX];
     uint8_t reg_size[REG_COUNT]; // number of valid bytes per register (0..4)
@@ -117,6 +128,11 @@ class I2CSlaveThread : public concurrency::OSThread
         uint32_t node_id;
         uint8_t  sub; /* sender ALMEMO slot index — part of the stream key */
         bool     in_use;
+        /* Letzter Wert fuer das Menue. Der EEPROM-Infoblock traegt den Exponenten
+         * nur einmal beim Anlegen; fuer MenuValueKind::Fixed brauchen wir ihn bei
+         * jedem Lesen, also hier mitfuehren. */
+        int16_t raw;
+        int8_t  exponent;
     };
 
     SlotEntry slots[MAX_SLOTS] = {};
@@ -125,6 +141,16 @@ class I2CSlaveThread : public concurrency::OSThread
 
     /* Returns the slot index for (node_id, sub), claiming a free one if unseen.
      * Returns 0xFF when all slots are taken and the pair is new. */
+    /** Menuestruktur bauen und s_menu_hdr daraus ableiten. */
+    void    buildMenu();
+    /** Laufende Werte fuer den Werteblock einsammeln. @return true bei Aenderung. */
+    bool    pollMenuValues();
+
+    /* Pool-Offsets der festen Menuetexte, in buildMenu() gefuellt. Der
+     * Werteblock setzt daraus die Text-Werte, ohne sie ein zweites Mal
+     * abzulegen -- nach finish() darf nichts mehr in den Pool. */
+    uint16_t offType = 0, offIdent = 0, offVer = 0, offFirmware = 0;
+    uint16_t offPreset[16]{}; /* Pool-Offset je Preset-Enumwert */
     uint8_t findOrAllocSlot(uint32_t node_id, uint8_t sub);
     void    initSlotForNode(uint8_t slot, uint32_t node_id, uint8_t sub, const char unit[2], int8_t exponent);
     void    clearSlot(uint8_t slot);
@@ -135,9 +161,8 @@ class I2CSlaveThread : public concurrency::OSThread
     /* Internal state (accessed from ISR — keep volatile) */
     static volatile uint8_t s_eeprom_ptr[2]; // current address pointer per EEPROM
     static volatile uint8_t s_reg_ptr;       // current register for 0x40
-    static volatile uint8_t s_menu_ptr;      // current offset in the menu window
-    /* Kopf des Menue-Kanals. Vorerst nur Magic + Modellversion: der Node
-     * erkennt daran, dass hier ein Receiver steckt. Struktur und Werte folgen. */
+    static volatile uint16_t s_menu_ptr;     // 16-Bit-Offset im Menue-Fenster
+    /* Kopf des Menue-Kanals, aus menu abgeleitet (s. buildMenu). */
     static MenuWireHeader   s_menu_hdr;
 
     /* Singleton pointer so static callbacks can reach instance data */
