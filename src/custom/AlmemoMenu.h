@@ -86,14 +86,6 @@
 /* Item-Flags */
 #define MENU_ITEM_DISABLED 0x01 /* nicht auswaehlbar (z.B. Preset bei use_preset=0) */
 
-/* Codes fuer MenuItemKind::Action, uebertragen in MenuItem::target.
- *
- * Aktionen fuehrt immer der HOST aus, also das Geraet mit dem Display -- nicht
- * der Eigentuemer des Menues. Darum liegen sie hier im Modell und nicht in
- * einer der beiden Quellen: der Node holt sich das Receiver-Menue und muss
- * dessen Aktionen genauso verstehen wie die seines eigenen. */
-#define MENU_ACTION_SWAP_DISPLAY 0x01 /* zwischen Node- und Receiver-Menue wechseln */
-
 /* Semantische Kennung einer Einstellung, in MenuItem::setting.
  *
  * Gebraucht fuer "Auf beide anwenden": ein Edit traegt den ITEM-INDEX, und der
@@ -105,6 +97,14 @@
 #define MENU_SETTING_NONE     0x00
 #define MENU_SETTING_INTERVAL 0x01 /* moduleConfig.telemetry.environment_update_interval */
 #define MENU_SETTING_PRESET   0x02 /* config.lora.modem_preset */
+#define MENU_SETTING_DISPLAY  0x03 /* welches Menue das Display zeigt */
+
+/* Werte zu MENU_SETTING_DISPLAY. Anders als die anderen Einstellungen gehoert
+ * diese dem GERAET MIT DEM DISPLAY, nicht dem Eigentuemer des Menues -- beide
+ * Menues zeigen die Zeile, gefuellt und angewandt wird sie vom Host. Darum
+ * auch kein "Auf beide anwenden": es gibt nur ein Display. */
+#define MENU_DISPLAY_NODE    0
+#define MENU_DISPLAY_GATEWAY 1
 
 // =========================================================================
 //  Modell — alles POD und serialisierbar
@@ -117,7 +117,7 @@ enum class MenuItemKind : uint8_t {
     Submenu,    /* oeffnet target */
     Back,       /* eine Ebene zurueck */
     Hint,       /* Tastenhinweis, linksbuendig, kein Wert */
-    Action,     /* Aktion ohne Wert; target traegt den Code (MENU_ACTION_*) */
+    Toggle,     /* sofort wirksam: kein Auswahldialog, keine Bestaetigung */
 };
 
 enum class MenuPageKind : uint8_t {
@@ -135,15 +135,16 @@ enum class MenuValueKind : uint8_t {
     Overflow, /* "OVR"  : ausserhalb des Messbereichs */
 };
 
-struct MenuItem { /* 10 Byte */
+struct MenuItem { /* 12 Byte */
     uint16_t label;
-    uint16_t unit;   /* Pool-Offset, MENU_NO_TEXT = keine Einheit */
-    uint8_t  value;  /* Index in values[], MENU_NO_IDX = keiner */
-    uint8_t  kind;   /* MenuItemKind */
-    uint8_t  target; /* Submenu: Seite · EditEnum: Optionsliste */
-    uint8_t  numSpec;/* EditEnum/EditNumber: Index in numbers[], sonst MENU_NO_IDX */
-    uint8_t  flags;
-    uint8_t  setting; /* MENU_SETTING_* -- Bedeutung, nicht Position */
+    uint16_t unit;    /* Pool-Offset, MENU_NO_TEXT = keine Einheit */
+    uint8_t  value;   /* Index in values[], MENU_NO_IDX = keiner */
+    uint8_t  kind;    /* MenuItemKind */
+    uint8_t  target;  /* Submenu: Seite · EditEnum: Optionsliste */
+    uint8_t  numSpec; /* EditEnum/EditNumber: Index in numbers[], sonst MENU_NO_IDX */
+    uint8_t  flags;   /* MENU_ITEM_* */
+    uint8_t  setting; /* MENU_SETTING_*: WELCHE Einstellung, unabhaengig von der Position */
+    uint16_t _pad;    /* ausdruecklich frei */
 };
 
 struct MenuPage { /* 8 Byte */
@@ -632,12 +633,13 @@ class MenuController
             st.numSpec  = it.numSpec;
             startDigits(s, vals, st, it);
             break;
-        case MenuItemKind::Action:
-            /* Kein Confirm-Dialog: eine Aktion hat keinen Wert, den man
-             * bestaetigen koennte, und ist sofort sichtbar. Zurueck ins
-             * Karussell, damit man das Ergebnis gleich sieht. */
+        case MenuItemKind::Toggle:
+            /* Sofort wirksam. Weder Auswahlliste noch Confirm: der Wert des
+             * Items IST bereits das Ziel, es gibt also nichts zu waehlen und
+             * nichts zu bestaetigen. Zurueck ins Karussell, damit man das
+             * Ergebnis gleich sieht. */
             out.item    = idx;
-            out.raw     = (int32_t)it.target;
+            out.raw     = (it.value != MENU_NO_IDX && vals) ? vals[it.value].raw : 0;
             out.targets = MENU_TARGET_SELF;
             st.mode     = MenuMode::Carousel;
             st.cursor = st.scroll = 0;

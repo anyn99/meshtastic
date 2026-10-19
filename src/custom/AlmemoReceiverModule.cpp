@@ -703,6 +703,8 @@ enum : uint8_t {
     VAL_VER,
     VAL_FIRMWARE,
     VAL_PRESET,
+    VAL_DISPLAY,        /* aktuelles Display; gefuellt vom Host */
+    VAL_DISPLAY_TARGET, /* Ziel des Toggle-Items; gefuellt vom Host */
     VAL_MENU_COUNT,
 };
 
@@ -762,7 +764,8 @@ void I2CSlaveThread::buildMenu()
     /* --- Auswahllisten: geteilt mit dem Node, s. AlmemoMenuSettings.h.
      *     OHNE Intervall: der Receiver sendet keine ALMEMO-Pakete, ein
      *     Sendeintervall hat hier keine Bedeutung. --- */
-    const uint8_t enumPreset = menudef::presetEnum(b, offPreset);
+    const uint8_t enumPreset  = menudef::presetEnum(b, offPreset);
+    const uint8_t enumDisplay = menudef::displayEnum(b);
 
     /* --- Messwerte. Kein Countdown wie beim Node: der Receiver sendet nicht,
      *     er empfaengt -- es gibt also keine "naechste Aktualisierung". --- */
@@ -807,14 +810,18 @@ void I2CSlaveThread::buildMenu()
      * Kollisionsschutz. */
     const uint8_t pageMenu = menu.pageCount;
     b.page("EINSTELL.", MenuPageKind::Menu);
-    b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
+    b.item("Radio-Mode", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
            config.lora.use_preset ? 0 : MENU_ITEM_DISABLED, MENU_SETTING_PRESET);
-    b.item("-> Node-Display", MENU_NO_IDX, nullptr, MenuItemKind::Action, MENU_ACTION_SWAP_DISPLAY);
+    /* Toggle: ein Druck schaltet um, ohne Auswahlliste und Bestaetigung.
+     * Angezeigt wird das ZIEL; den aktuellen Zustand zeigt die Status-Seite. */
+    b.item("Display ->", VAL_DISPLAY_TARGET, nullptr, MenuItemKind::Toggle, enumDisplay, MENU_NO_IDX, 0,
+           MENU_SETTING_DISPLAY);
     b.item("<- Zurück", MENU_NO_IDX, nullptr, MenuItemKind::Back);
 
     b.page("EINSTELL.", MenuPageKind::Status, MENU_PAGE_OPENS_MENU, pageMenu);
-    b.item("Preset", VAL_PRESET);
-    b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+    b.item("Radio-Mode", VAL_PRESET);
+    b.item("Display", VAL_DISPLAY, nullptr, MenuItemKind::Display, enumDisplay, MENU_NO_IDX, 0,
+           MENU_SETTING_DISPLAY);
     b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
     b.item("Lang drücken: ändern", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
 

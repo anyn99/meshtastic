@@ -245,47 +245,163 @@ class AlmemoOledThread : public concurrency::OSThread
         if (!s || edit.item >= s->itemCount)
             return;
 
-        /* Aktionen fuehrt immer das Geraet mit dem Display aus, egal aus welchem
-         * Menue sie kommen -- sie gehen also NICHT an die Quelle. */
-        if ((MenuItemKind)s->items[edit.item].kind == MenuItemKind::Action) {
-            runMenuAction((uint8_t)edit.raw);
+        /* Welches Menue das Display zeigt, ist UNSERE Einstellung -- egal aus
+         * welchem Menue sie kommt, sie geht nicht an eine Quelle. */
+        if (s->items[edit.item].setting == MENU_SETTING_DISPLAY) {
+            applyDisplaySetting(edit.raw);
             return;
         }
 
-        /* Eigenes Menue: nichts zu verteilen. */
-        if (!remoteActive()) {
-            local.apply(edit);
-            return;
-        }
+        /* MENU_TARGET_HOST setzt der Controller nur bei "Auf beide anwenden"
+         * (MenuAction::ApplyBoth), SELF immer. Welches Geraet "die andere Seite"
+         * ist, haengt daran, wessen Menue gerade angezeigt wird -- und in beide
+         * Richtungen wird ueber die BEDEUTUNG adressiert, nie ueber den
+         * Item-Index: der gilt nur im eigenen Menue. */
+        const uint8_t setting = s->items[edit.item].setting;
+        const bool    both    = (edit.targets & MENU_TARGET_HOST) != 0;
 
-        /* Receiver-Menue: SELF ist der Receiver (Eigentuemer des Menues), HOST
-         * sind wir. Die Bedeutung kommt aus seinem Item, damit wir dieselbe
-         * Einstellung treffen und nicht denselben Index -- s. MENU_SETTING_*. */
-        if (edit.targets & MENU_TARGET_SELF)
-            remote.apply(edit);
-        if (edit.targets & MENU_TARGET_HOST)
-            local.applySetting(s->items[edit.item].setting, edit.raw);
+        if (remoteActive()) {
+            remote.apply(edit); /* Eigentuemer ist der Receiver, Index passt */
+            if (both)
+                local.applySetting(setting, edit.raw);
+        } else {
+            local.apply(edit); /* Eigentuemer sind wir */
+            if (both)
+                remoteApplySetting(setting, edit.raw);
+        }
     }
 
-    /** MENU_ACTION_* ausfuehren. */
-    void runMenuAction(uint8_t code)
+    /**
+     * MENU_SETTING_DISPLAY anwenden -- das ist unsere eigene Einstellung, nicht
+     * die einer Quelle: es gibt nur ein Display.
+     */
+    void applyDisplaySetting(int32_t raw)
     {
-        switch (code) {
-        case MENU_ACTION_SWAP_DISPLAY:
-            if (!remote.structure()) {
-                /* Vom Node-Menue aus gewaehlt, ohne dass ein Receiver steckt --
-                 * dann gibt es nichts, worauf man wechseln koennte. */
-                LOG_INFO("AlmemoOled: kein Receiver aufgesteckt, Anzeige bleibt beim Node");
-                break;
-            }
-            forceLocal = !forceLocal;
-            MenuController::reset(state);
-            break;
-        default:
-            LOG_WARN("AlmemoOled: unbekannte Menue-Aktion %u", (unsigned)code);
-            break;
+        const bool wantGateway = (raw == MENU_DISPLAY_GATEWAY);
+        if (wantGateway && !remote.structure()) {
+            /* Im Node-Menue gewaehlt, ohne dass ein Receiver steckt -- es gibt
+             * nichts, worauf man wechseln koennte. */
+            LOG_INFO("AlmemoOled: kein Receiver aufgesteckt, Anzeige bleibt beim Node");
+            return;
         }
+        forceLocal = !wantGateway;
+        MenuController::reset(state);
         dirty = true;
+    }
+
+    /**
+     * Werte fuer die Anzeige, mit gepatchten Display-Zeilen.
+     *
+     * Beide Menues fuehren die Zeilen, aber nur WIR wissen, welches Menue das
+     * Display zeigt -- der Receiver kann das nicht liefern. Also eine Kopie des
+     * Wertesatzes, in der genau diese Werte gesetzt sind. Gesucht werden die
+     * Items ueber MENU_SETTING_DISPLAY, nicht ueber feste Indizes: die beiden
+     * Menues haben verschiedene Wertesaetze.
+     *
+     * Zwei Rollen, unterschieden ueber die Item-Art:
+     *   Toggle  -> das ZIEL, also das jeweils andere Display. Ein Druck darauf
+     *              schaltet sofort dorthin, und die Zeile liest sich als
+     *              "Display ->   Gateway".
+     *   sonst   -> der AKTUELLE Zustand, fuer die Status-Seite.
+     *
+     * Gesetzt werden `text` fuer die Anzeige und `raw` fuer die Auswertung des
+     * Drucks (MenuItemKind::Toggle nimmt den Rohwert als Ziel).
+     */
+    const MenuValue *renderValues(const MenuStruct &s)
+    {
+        const MenuValue *src     = activeValues();
+        bool             patched = false;
+
+        const int32_t cur    = remoteActive() ? MENU_DISPLAY_GATEWAY : MENU_DISPLAY_NODE;
+        const int32_t target = remoteActive() ? MENU_DISPLAY_NODE : MENU_DISPLAY_GATEWAY;
+
+        for (uint8_t i = 0; i < s.itemCount; i++) {
+            const MenuItem &it = s.items[i];
+            if (it.setting != MENU_SETTING_DISPLAY || it.value == MENU_NO_IDX || it.value >= MENU_MAX_VALUES)
+                continue;
+            if (!patched) {
+                memcpy(valsPatched, src, sizeof(valsPatched));
+                patched = true;
+            }
+            const int32_t raw = ((MenuItemKind)it.kind == MenuItemKind::Toggle) ? target : cur;
+            valsPatched[it.value].kind = (uint8_t)MenuValueKind::Text;
+            valsPatched[it.value].text = optionText(s, it.target, raw);
+            valsPatched[it.value].raw  = raw;
+        }
+        return patched ? valsPatched : src;
+    }
+
+    /** Pool-Offset der Option mit diesem Rohwert, MENU_NO_TEXT wenn keine passt. */
+    static uint16_t optionText(const MenuStruct &s, uint8_t enumIdx, int32_t raw)
+    {
+        if (enumIdx == MENU_NO_IDX || enumIdx >= s.enumCount)
+            return MENU_NO_TEXT;
+        const MenuEnum &e = s.enums[enumIdx];
+        for (uint8_t i = 0; i < e.count; i++)
+            if (s.options[e.firstOption + i].raw == raw)
+                return s.options[e.firstOption + i].label;
+        return MENU_NO_TEXT;
+    }
+
+    /** Traegt dieses Menue die Einstellung? */
+    static bool hasSetting(const MenuStruct *s, uint8_t setting)
+    {
+        if (!s || setting == MENU_SETTING_NONE)
+            return false;
+        for (uint8_t i = 0; i < s->itemCount; i++)
+            if (s->items[i].setting == setting)
+                return true;
+        return false;
+    }
+
+    /** Das jeweils ANDERE Menue -- die Gegenseite eines "Auf beide anwenden". */
+    const MenuStruct *otherStruct() const { return remoteActive() ? local.structure() : remote.structure(); }
+
+    /**
+     * "Auf beide anwenden" anbieten?
+     *
+     * Bedingung ist nicht, WELCHES Menue angezeigt wird, sondern dass ein
+     * Receiver steckt -- vom Node-Menue aus soll der Radio-Mode genauso auf
+     * beide gehen. Zusaetzlich muss die andere Seite die Einstellung
+     * ueberhaupt haben: der Receiver hat kein Sendeintervall, dort waere das
+     * Angebot eine Luege.
+     *
+     * Welches Display aktiv ist, gehoert ausdruecklich nicht dazu: davon
+     * existiert nur eines.
+     */
+    bool offerBothFor(const MenuStruct &s) const
+    {
+        if (!remote.structure() || state.editItem == MENU_NO_IDX || state.editItem >= s.itemCount)
+            return false;
+        const uint8_t setting = s.items[state.editItem].setting;
+        if (setting == MENU_SETTING_DISPLAY)
+            return false;
+        return hasSetting(otherStruct(), setting);
+    }
+
+    /**
+     * Eine Einstellung an den Receiver schicken, adressiert ueber ihre
+     * BEDEUTUNG.
+     *
+     * Nötig, weil ein Edit aus dem Node-Menue einen Node-Item-Index traegt --
+     * der bedeutet beim Receiver nichts. Also dort das Item mit demselben
+     * MENU_SETTING_* suchen und dessen Index senden.
+     */
+    bool remoteApplySetting(uint8_t setting, int32_t raw)
+    {
+        const MenuStruct *r = remote.structure();
+        if (!r)
+            return false;
+        for (uint8_t i = 0; i < r->itemCount; i++) {
+            if (r->items[i].setting != setting || (MenuItemKind)r->items[i].kind != MenuItemKind::EditEnum)
+                continue;
+            MenuEdit e{};
+            e.item = i;
+            e.raw  = raw;
+            return remote.apply(e);
+        }
+        LOG_WARN("AlmemoOled: Receiver hat keine Einstellung %u", (unsigned)setting);
+        return false;
     }
 
     void onShort()
@@ -293,12 +409,10 @@ class AlmemoOledThread : public concurrency::OSThread
         const MenuStruct *s = activeStruct();
         if (!s)
             return;
-        /* "Auf beide anwenden" nur anbieten, wenn das angezeigte Menue dem
-         * Receiver gehoert -- dann gibt es ueberhaupt ein zweites Geraet. Muss
-         * VOR dem Controller stehen, der daraus die Confirm-Aktionen baut. */
-        state.offerBoth = remoteActive();
+        /* Muss VOR dem Controller stehen, der daraus die Confirm-Aktionen baut. */
+        state.offerBoth = offerBothFor(*s);
         MenuEdit edit{};
-        if (MenuController::shortPress(*s, activeValues(), state, edit))
+        if (MenuController::shortPress(*s, renderValues(*s), state, edit))
             applyEdit(edit);
         dirty = true;
     }
@@ -308,9 +422,9 @@ class AlmemoOledThread : public concurrency::OSThread
         const MenuStruct *s = activeStruct();
         if (!s)
             return;
-        state.offerBoth = remoteActive(); /* s. onShort() */
+        state.offerBoth = offerBothFor(*s); /* s. onShort() */
         MenuEdit edit{};
-        if (MenuController::longPress(*s, activeValues(), state, edit))
+        if (MenuController::longPress(*s, renderValues(*s), state, edit))
             applyEdit(edit);
         dirty = true;
     }
@@ -340,7 +454,7 @@ class AlmemoOledThread : public concurrency::OSThread
             (MenuPageKind)s->pages[state.statusPage].kind != MenuPageKind::Status)
             MenuController::reset(state);
 
-        MenuRenderer::render(display, *s, activeValues(), state);
+        MenuRenderer::render(display, *s, renderValues(*s), state);
     }
 
     AlmemoSSD1306 display{ALMEMO_OLED_ADDR, -1, -1, GEOMETRY_128_64, I2C_ONE, /* frequency */ -1};
@@ -354,6 +468,8 @@ class AlmemoOledThread : public concurrency::OSThread
      * zurueckgesetzt: "aufgesteckt = Receiver" soll nach dem erneuten Anstecken
      * wieder gelten, sonst waere der Zustand unsichtbar und ueberraschend. */
     bool forceLocal = false;
+    /* Anzeigekopie mit gepatchter Display-Zeile, s. renderValues(). */
+    MenuValue valsPatched[MENU_MAX_VALUES]{};
     MenuState       state;
     bool            dirty      = false;
     uint32_t        lastPollMs = 0;

@@ -61,7 +61,9 @@ class AlmemoMenuLocal
         VAL_FIRMWARE,
         VAL_INTERVAL,
         VAL_PRESET,
-        VAL_NEXT, /* Sekunden bis zur naechsten Aktualisierung */
+        VAL_NEXT,    /* Sekunden bis zur naechsten Aktualisierung */
+        VAL_DISPLAY,        /* aktuelles Display; gefuellt vom Host */
+        VAL_DISPLAY_TARGET, /* Ziel des Toggle-Items; gefuellt vom Host */
         VAL_COUNT
     };
     static constexpr uint8_t MAX_MEAS = 10;
@@ -364,13 +366,16 @@ class AlmemoMenuLocal
         /* --- Auswahllisten: geteilt mit dem Receiver, s. AlmemoMenuSettings.h --- */
         const uint8_t enumInterval = menudef::intervalEnum(b);
         const uint8_t enumPreset   = menudef::presetEnum(b, offPreset);
+        const uint8_t enumDisplay  = menudef::displayEnum(b);
         const uint8_t numInterval  = menudef::intervalNumber(b);
 
         /* --- Messwert-Seiten ---
-         * Die Countdown-Zeile zaehlt als zusaetzliche Zeile hinter den Kanaelen
-         * und wird IMMER gezeigt. Auf die letzte Seite passen dadurch nur vier
-         * Kanaele, und bei vielen Messstellen kommt eine Seite dazu
-         * (10 Kanaele -> 5 + 5 + Countdown = 3 Seiten). */
+         * Die Countdown-Zeile steht IMMER in der fuenften Zeile der LETZTEN
+         * Seite; davor wird mit leeren Zeilen aufgefuellt. Auf die letzte Seite
+         * passen dadurch nur vier Kanaele, und bei einem Vielfachen von fuenf
+         * kommt eine Seite mit nur dem Countdown dazu
+         * (10 Kanaele -> 5 + 5 + Countdown = 3 Seiten). Die Seitenzahl aus
+         * rows = n + 1 reserviert den Platz genau dafuer. */
         const uint8_t n     = pkt.count > MAX_MEAS ? MAX_MEAS : pkt.count;
         const uint8_t rows  = (uint8_t)(n + 1); /* Kanaele + Countdown */
         const uint8_t pages = n ? (uint8_t)((rows + MENU_ROWS - 1) / MENU_ROWS) : 1;
@@ -388,20 +393,26 @@ class AlmemoMenuLocal
                 b.item("Keine Messstellen", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
                 continue;
             }
+            const bool lastPage = (pg + 1 == pages);
             for (uint8_t r = 0; r < MENU_ROWS; r++) {
                 const uint8_t i = (uint8_t)(pg * MENU_ROWS + r);
-                if (i > n)
-                    break;
-                if (i == n) { /* letzte Zeile hinter dem letzten Kanal */
-                    b.item("Aktualisierung in", VAL_NEXT, "s");
-                    break;
+                if (i < n) {
+                    char lbl[10], unit[4];
+                    channelLabel(pkt.values[i].slot, lbl, sizeof(lbl));
+                    unit[0] = pkt.values[i].unit[0];
+                    unit[1] = pkt.values[i].unit[1];
+                    unit[2] = '\0';
+                    b.item(lbl, (uint8_t)(VAL_MEAS0 + i), unit);
+                    continue;
                 }
-                char lbl[10], unit[4];
-                channelLabel(pkt.values[i].slot, lbl, sizeof(lbl));
-                unit[0] = pkt.values[i].unit[0];
-                unit[1] = pkt.values[i].unit[1];
-                unit[2] = '\0';
-                b.item(lbl, (uint8_t)(VAL_MEAS0 + i), unit);
+                /* Keine Kanaele mehr. Nur die letzte Seite traegt den
+                 * Countdown, und der gehoert nach unten. */
+                if (!lastPage)
+                    break;
+                if (r == MENU_ROWS - 1)
+                    b.item("Aktualisiert in", VAL_NEXT, "s");
+                else
+                    b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
             }
         }
 
@@ -432,19 +443,22 @@ class AlmemoMenuLocal
         b.page("EINSTELLUNGEN", MenuPageKind::Menu);
         b.item("Sendeintervall", VAL_INTERVAL, nullptr, MenuItemKind::EditEnum, enumInterval, numInterval, 0,
                MENU_SETTING_INTERVAL);
-        b.item("Radio-Preset", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
+        b.item("Radio-Mode", VAL_PRESET, nullptr, MenuItemKind::EditEnum, enumPreset, MENU_NO_IDX,
                config.lora.use_preset ? 0 : MENU_ITEM_DISABLED, MENU_SETTING_PRESET);
-        /* Nur erreichbar, solange das Display das Node-Menue zeigt -- also
-         * entweder ohne aufgesteckten Receiver (dann folgenlos) oder nachdem man
-         * dort "-> Node-Display" gewaehlt hat. Dies ist der Weg zurueck. */
-        b.item("-> Receiver-Display", MENU_NO_IDX, nullptr, MenuItemKind::Action, MENU_ACTION_SWAP_DISPLAY);
+        /* Toggle: ein Druck schaltet um, ohne Auswahlliste und ohne
+         * Bestaetigung. Angezeigt wird das ZIEL, nicht der aktuelle Zustand --
+         * den zeigt die Status-Seite. `target` traegt die Optionsliste, aus der
+         * der Host den Text holt (s. AlmemoOledDisplay::renderValues). */
+        b.item("Display ->", VAL_DISPLAY_TARGET, nullptr, MenuItemKind::Toggle, enumDisplay, MENU_NO_IDX, 0,
+               MENU_SETTING_DISPLAY);
         b.item("<- Zurück", MENU_NO_IDX, nullptr, MenuItemKind::Back);
 
         /* --- Einstellungen: letzte Status-Seite, langer Druck oeffnet das Menue --- */
         b.page("EINSTELLUNGEN", MenuPageKind::Status, MENU_PAGE_OPENS_MENU, pageMenu);
         b.item("Intervall", VAL_INTERVAL);
-        b.item("Preset", VAL_PRESET);
-        b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
+        b.item("Radio-Mode", VAL_PRESET);
+        b.item("Display", VAL_DISPLAY, nullptr, MenuItemKind::Display, enumDisplay, MENU_NO_IDX, 0,
+               MENU_SETTING_DISPLAY);
         b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
         b.item("Lang drücken: ändern", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
 

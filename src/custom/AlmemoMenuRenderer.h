@@ -36,7 +36,7 @@ class MenuRenderer
             drawStatus(d, s, vals, st);
             break;
         case MenuMode::Menu:
-            drawMenu(d, s, st);
+            drawMenu(d, s, vals, st);
             break;
         case MenuMode::SelectList:
             drawSelect(d, s, vals, st);
@@ -123,33 +123,51 @@ class MenuRenderer
     }
 
     /** Liste mit Cursor; letzte Zeile Tastenhinweis. */
-    static void drawList(SSD1306Wire &d, const char *const *labels, uint8_t count, uint8_t cursor, uint8_t scroll,
-                         const char *hint)
+    /** @param values optional, je Zeile rechtsbuendig; nullptr oder "" = nichts. */
+    static void drawList(SSD1306Wire &d, const char *const *labels, const char *const *values, uint8_t count,
+                         uint8_t cursor, uint8_t scroll, const char *hint)
     {
         const uint8_t window = (uint8_t)(MENU_ROWS - (hint ? 1 : 0));
-        d.setTextAlignment(TEXT_ALIGN_LEFT);
         for (uint8_t r = 0; r < window; r++) {
             const uint8_t i = (uint8_t)(scroll + r);
             if (i >= count)
                 break;
             char line[30];
             snprintf(line, sizeof(line), "%s %s", i == cursor ? ">" : " ", labels[i]);
+            d.setTextAlignment(TEXT_ALIGN_LEFT);
             d.drawString(0, rowY(r), line);
+            if (values && values[i] && values[i][0]) {
+                d.setTextAlignment(TEXT_ALIGN_RIGHT);
+                d.drawString(WIDTH - 1, rowY(r), values[i]);
+            }
         }
-        if (hint)
+        if (hint) {
+            d.setTextAlignment(TEXT_ALIGN_LEFT);
             d.drawString(0, rowY(MENU_ROWS - 1), hint);
+        }
     }
 
-    static void drawMenu(SSD1306Wire &d, const MenuStruct &s, const MenuState &st)
+    static void drawMenu(SSD1306Wire &d, const MenuStruct &s, const MenuValue *vals, const MenuState &st)
     {
         const MenuPage &p = s.pages[st.menuPage];
         header(d, s.text(p.title), nullptr);
 
+        /* Items mit Wert zeigen ihn rechts mit an -- man sieht die aktuelle
+         * Einstellung also schon in der Liste, und ein Toggle-Item kann so sein
+         * Ziel anzeigen ("Display ->   Gateway"). */
         const char *labels[MENU_MAX_ITEMS];
-        for (uint8_t i = 0; i < p.itemCount && i < MENU_MAX_ITEMS; i++)
-            labels[i] = s.text(s.items[p.firstItem + i].label);
+        char        valbuf[MENU_MAX_ITEMS][14];
+        const char *values[MENU_MAX_ITEMS];
+        for (uint8_t i = 0; i < p.itemCount && i < MENU_MAX_ITEMS; i++) {
+            const MenuItem &it = s.items[p.firstItem + i];
+            labels[i]          = s.text(it.label);
+            valbuf[i][0]       = '\0';
+            if (vals && it.value != MENU_NO_IDX)
+                menufmt::value(s, vals[it.value], valbuf[i], sizeof(valbuf[i]));
+            values[i] = valbuf[i];
+        }
 
-        drawList(d, labels, p.itemCount, st.cursor, st.scroll, "kurz=weiter  lang=OK");
+        drawList(d, labels, values, p.itemCount, st.cursor, st.scroll, "kurz=weiter  lang=OK");
     }
 
     /** Kopfzeile der Edit-Screens: Titel links, aktueller Wert rechts. */
@@ -174,7 +192,7 @@ class MenuRenderer
         for (uint8_t i = 0; i < e.count && i < MENU_MAX_OPTIONS; i++)
             labels[i] = s.text(s.options[e.firstOption + i].label);
 
-        drawList(d, labels, e.count, st.cursor, st.scroll, "kurz=weiter  lang=OK");
+        drawList(d, labels, nullptr, e.count, st.cursor, st.scroll, "kurz=weiter  lang=OK");
     }
 
     static void drawDigits(SSD1306Wire &d, const MenuStruct &s, const MenuValue *vals, const MenuState &st)

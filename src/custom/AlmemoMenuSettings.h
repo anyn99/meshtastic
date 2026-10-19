@@ -83,4 +83,20 @@ inline uint8_t presetEnum(MenuBuilder &b, uint16_t *offPreset)
     return e;
 }
 
+/**
+ * Welches Menue das Display zeigt.
+ *
+ * Steht hier bei den geteilten Listen, weil BEIDE Menues die Zeile fuehren --
+ * gefuellt und angewandt wird sie aber vom Geraet mit dem Display, nicht vom
+ * Eigentuemer des Menues (s. MENU_SETTING_DISPLAY).
+ */
+inline uint8_t displayEnum(MenuBuilder &b)
+{
+    const uint8_t e = b.beginEnum();
+    b.option("Node", MENU_DISPLAY_NODE);
+    b.option("Gateway", MENU_DISPLAY_GATEWAY);
+    b.option("<- Abbrechen", MENU_OPT_CANCEL);
+    return e;
+}
+
 } // namespace menudef
