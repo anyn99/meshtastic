@@ -251,7 +251,9 @@ I2CSlaveThread::I2CSlaveThread() : OSThread("I2CSlave")
      * nur anzeigen oder gegen eine Typentabelle pruefen, ist unklar: vorher
      * stand hier "FHAD46  ", die Kennung eines echten Ahlborn-Fuehlers. Falls
      * ein Logger den Fuehler nicht mehr annimmt, ist das der erste Verdacht. */
-    memcpy(&eeprom[0][0x00], "LORA-GW ", 8);
+    static_assert(sizeof(ALMEMO_GW_NAME) - 1 <= 8, "ALMEMO_GW_NAME passt nicht ins Namensfeld");
+    memset(&eeprom[0][0x00], ' ', 8); /* ALMEMO-Namensfeld ist leerzeichengefuellt */
+    memcpy(&eeprom[0][0x00], ALMEMO_GW_NAME, sizeof(ALMEMO_GW_NAME) - 1);
     strncpy((char*)&eeprom[0][0xF8], "   6.66", 8);
 
     /* Braucht Kennung und Version aus dem EEPROM, also NACH deren Initialisierung. */

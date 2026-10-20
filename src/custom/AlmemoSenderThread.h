@@ -152,6 +152,9 @@ class AlmemoSenderThread : public concurrency::OSThread
     /* Fehlgeschlagene Kopf-Abrufe in Folge; Start = Limit, also "nicht
      * angedockt". Entprellung, s. ALMEMO_MENU_MISS_LIMIT. */
     uint8_t menuMisses = ALMEMO_MENU_MISS_LIMIT;
+    /* Gateway schon ueber seine Kennung gemeldet? probeSensors() laeuft im
+     * 500-ms-Takt, die Warnung soll nur beim Wechsel kommen. */
+    bool gwIdentLogged = false;
     /* Aktueller Andock-Zustand. Steckt ein Receiver, sendet dieser Node nicht. */
     bool receiverDocked = false;
     uint32_t waitStartMs = 0;
@@ -275,6 +278,17 @@ class AlmemoSenderThread : public concurrency::OSThread
         return true;
     }
 
+    /**
+     * Ist das unser eigenes LoRa-Gateway statt eines Fuehlers?
+     *
+     * Erkannt wird es an der Kennung in seinem emulierten EEPROM
+     * (ALMEMO_GW_NAME). Pflicht an JEDER Stelle, die eine ALMEMO-Quelle
+     * uebernimmt -- sonst sendet die Node die per LoRa empfangenen Werte als
+     * ihre eigenen wieder raus und sie kreisen. Die Andock-Erkennung @0x41
+     * deckt das nur ab, solange der Menuekanal lesbar ist.
+     */
+    static bool isOwnGateway(const AlmemoI2CSensor &s) { return strcmp(s.deviceName(), ALMEMO_GW_NAME) == 0; }
+
     /** Reines Adress-Probing des Multiplexers @0x70. */
     static bool tcaPresent() { return i2cPresent(ALMEMO_TCA_ADDR); }
 
@@ -293,6 +307,11 @@ class AlmemoSenderThread : public concurrency::OSThread
         for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++) {
             tcaSelect(ch);
             muxPresent[ch] = almemoMux[ch].begin(Wire);
+            if (muxPresent[ch] && isOwnGateway(almemoMux[ch])) {
+                /* Gateway am Mux-Kanal: kein Fuehler, s. isOwnGateway(). */
+                LOG_WARN("AlmemoSender: mux ch%u traegt das Gateway ('%s') -- uebersprungen", ch, ALMEMO_GW_NAME);
+                muxPresent[ch] = false;
+            }
             if (muxPresent[ch]) {
                 muxCount++;
                 LOG_INFO("AlmemoSender: mux ch%u ALMEMO ready (%u slots)", ch, almemoMux[ch].numSlots());
@@ -325,8 +344,11 @@ class AlmemoSenderThread : public concurrency::OSThread
         for (uint8_t ch = 0; ch < TCA_CHANNELS; ch++) {
             tcaSelect(ch);
             const bool present = AlmemoI2CSensor::probe(Wire);
-            if (present && !muxPresent[ch])
+            if (present && !muxPresent[ch]) {
                 muxPresent[ch] = almemoMux[ch].begin(Wire); // neu angesteckt -> Metadaten laden
+                if (muxPresent[ch] && isOwnGateway(almemoMux[ch]))
+                    muxPresent[ch] = false; // s. isOwnGateway()
+            }
             else if (!present)
                 muxPresent[ch] = false; // abgesteckt
             if (muxPresent[ch])
@@ -432,7 +454,25 @@ class AlmemoSenderThread : public concurrency::OSThread
             return true;
         }
         if (almemo.begin(Wire)) {
-            source = SRC_ALMEMO;
+            /* Unser eigenes Gateway? Dann ist das KEINE Messquelle, s.
+             * ALMEMO_GW_NAME. Diese Pruefung ist bewusst UNABHAENGIG von der
+             * Andock-Erkennung @0x41 oben: der Receiver ackt auf 0x50 und
+             * meldet ein plausibles ALMEMO-Geraet, also greift dort keine
+             * Plausibilitaetspruefung -- nur die Kennung verraet ihn. */
+            if (isOwnGateway(almemo)) {
+                receiverDocked = true; /* LED auf Idle, nicht NoSensor */
+                if (!gwIdentLogged) {
+                    gwIdentLogged = true;
+                    LOG_WARN("AlmemoSender: Gateway an 0x%02x ueber seine Kennung '%s' erkannt -- "
+                             "keine Messquelle. Der Menuekanal @0x%02x hat nicht geantwortet, "
+                             "sonst waere es schon oben aufgefallen.",
+                             (unsigned)AlmemoI2CSensor::EEPROM_ADDR, ALMEMO_GW_NAME,
+                             (unsigned)ALMEMO_MENU_I2C_ADDR);
+                }
+                return false;
+            }
+            gwIdentLogged = false;
+            source        = SRC_ALMEMO;
             LOG_INFO("AlmemoSender: ALMEMO source ready (%u slots)", almemo.numSlots());
             return true;
         }

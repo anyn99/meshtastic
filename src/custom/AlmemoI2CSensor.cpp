@@ -186,11 +186,31 @@ bool AlmemoI2CSensor::begin(TwoWire &w)
      * Bleibt eine laute Stelle: bei SRC_ALMEMO_MULTI ruft refreshMux() begin()
      * in jedem Sendezyklus pro Kanal. Das war aber auch vorher so. */
     LOG_INFO("AlmemoI2C: name='%s' ver='%s' slots=%u", name, version, slotCount);
-    /* Das Geraet gilt als erkannt, sobald 0x50 ackt -- AUCH ohne einen
-     * einzigen belegten Slot. Ein Fuehler ohne initialisierte Messstellen (etwa
-     * unser Receiver, bevor sein Sensor eingerichtet ist) ist dann eben ein
-     * Geraet ohne Messwerte: Kennung und Version stehen, Kanaele 0, keine
-     * Werte. Der Leseweg meldet das als ReadStatus::Empty. */
+
+    /* Ein Geraet ohne belegte Messstelle wird akzeptiert -- ein Fuehler, bei dem
+     * noch nichts eingerichtet ist, ist eben ein Geraet ohne Messwerte: Kennung
+     * und Version stehen, Kanaele 0, keine Werte. Der Leseweg meldet das als
+     * ReadStatus::Empty.
+     *
+     * Hat es aber NICHTS von sich gegeben -- keinen Namen, keine Version und
+     * keinen einzigen gueltigen Slot --, dann hat zwar 0x50 geackt, aber kein
+     * Byte davon war lesbar. Das ist kein Fuehler, das ist eine kaputte
+     * Strecke. Beobachtet mit einem Gateway hinter einem Pegelumsetzer, der nur
+     * noch die Adressphase durchliess: die Node uebernahm es als ALMEMO-Quelle
+     * ("Unknown Sensor Type 0x00", name='', ver='') und fragte danach den
+     * Menuekanal nicht mehr ab -- bei gesetzter Quelle laeuft probeSensors()
+     * nicht mehr --, womit die Receiver-Erkennung dauerhaft blockiert war.
+     *
+     * Die Pruefung ist bewusst konservativ: sie verlangt NICHT, dass alle drei
+     * Angaben stimmen, sondern verwirft nur, wenn alle drei fehlen. Ein echter
+     * Fuehler mit karger EEPROM-Belegung faellt damit nicht durch. */
+    if (!name[0] && !version[0] && slotCount == 0) {
+        /* DEBUG, nicht WARN: probeSensors() landet im 500-ms-Takt hier, und die
+         * INFO-Zeile darueber zeigt den Befund ohnehin. */
+        LOG_DEBUG("AlmemoI2C: 0x%02x ackt, meldet aber nichts -- kein Fuehler", EEPROM_ADDR);
+        return false;
+    }
+
     return true;
 }
 

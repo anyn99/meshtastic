@@ -78,6 +78,25 @@ struct __attribute__((packed)) AlmemoSensorPacket {
 #define ALMEMO_TYPE_I2C    0x00 /* Sensor direkt am I2C, kein ALMEMO-EEPROM */
 #define ALMEMO_TYPE_EMU    0x01 /* emulierte Werte, gar keine Hardware */
 
+/*
+ * Geraetekennung unseres LoRa-Gateways in seinem emulierten EEPROM
+ * (Offset 0x00, auf 8 Zeichen mit Leerzeichen aufgefuellt).
+ *
+ * Steht hier und nicht beim Receiver, weil BEIDE Seiten sie brauchen: der
+ * Receiver schreibt sie hin, und der Sender erkennt daran sein eigenes
+ * Gateway. Das ist die zweite, von I2C-Zustand unabhaengige Haelfte der
+ * Schleifensicherung: der Receiver ackt auf 0x50 und liefert ein voellig
+ * plausibles ALMEMO-Geraet samt gueltigem Slot-Layout (er muss das, damit die
+ * ALMEMO-Logger ihn lesen koennen). Wird er als Fuehler uebernommen, sendet
+ * die Node die ueber LoRa EMPFANGENEN Werte als ihre eigenen wieder raus, der
+ * Receiver legt sie unter der Node-Kennung ab -- beobachtet als zusaetzliche
+ * Messstelle "A9EF.M0.0" auf dem Receiver-Display.
+ *
+ * Die Andock-Erkennung am Menuekanal @0x41 allein genuegt dafuer nicht: faellt
+ * der Kanal aus, faellt mit ihm die Sicherung.
+ */
+#define ALMEMO_GW_NAME "LORA-GW"
+
 // =========================================================================
 //  Messwert-Slot, wie ihn ein Treiber liefert (von beiden Treibern direkt genutzt)
 // =========================================================================
