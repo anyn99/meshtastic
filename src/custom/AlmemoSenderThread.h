@@ -149,6 +149,9 @@ class AlmemoSenderThread : public concurrency::OSThread
     bool emptyPublished = false;
     /* Letzter geloggter Andock-Zustand, s. probeSensors(). */
     bool menuDockedLogged = false;
+    /* Fehlgeschlagene Kopf-Abrufe in Folge; Start = Limit, also "nicht
+     * angedockt". Entprellung, s. ALMEMO_MENU_MISS_LIMIT. */
+    uint8_t menuMisses = ALMEMO_MENU_MISS_LIMIT;
     /* Aktueller Andock-Zustand. Steckt ein Receiver, sendet dieser Node nicht. */
     bool receiverDocked = false;
     uint32_t waitStartMs = 0;
@@ -344,7 +347,23 @@ class AlmemoSenderThread : public concurrency::OSThread
          * solange nichts erkannt ist. */
         {
             MenuWireHeader mh{};
-            const bool     docked = menuChannelPresent(&mh);
+            const bool     answered = menuChannelPresent(&mh);
+
+            /* Entprellt, s. ALMEMO_MENU_MISS_LIMIT: ein einzelner kaputter
+             * Transfer darf nicht als "abgezogen" durchgehen, sonst landet der
+             * Receiver als ALMEMO-Fuehler auf 0x50. Startwert ist das Limit,
+             * also "nicht angedockt" -- ohne Receiver gilt nichts anderes. */
+            if (answered)
+                menuMisses = 0;
+            else if (menuMisses < ALMEMO_MENU_MISS_LIMIT)
+                menuMisses++;
+            const bool docked = (menuMisses < ALMEMO_MENU_MISS_LIMIT);
+
+            if (!answered && docked)
+                LOG_DEBUG("AlmemoSender: Menue @0x%02x nicht lesbar (%u/%u), gilt weiter als gesteckt",
+                          (unsigned)ALMEMO_MENU_I2C_ADDR, (unsigned)menuMisses,
+                          (unsigned)ALMEMO_MENU_MISS_LIMIT);
+
             if (docked != menuDockedLogged) {
                 menuDockedLogged = docked;
                 if (docked) {
@@ -426,7 +445,7 @@ class AlmemoSenderThread : public concurrency::OSThread
          * in I2C-Mitschnitten nachgewiesen). */
         if (i2cPresent(ALMEMO_SHT_ADDR)) {
             const bool shtOk = sht.begin(ALMEMO_SHT_ADDR);
-            almemoI2cClockGuard(); /* begin() hat den Takt verstellt */
+            almemoI2cBusGuard(); /* begin() hat Takt und Pull-ups verstellt */
             if (shtOk) {
                 source = SRC_SHT;
                 LOG_INFO("AlmemoSender: SHT @0x%02x ready", ALMEMO_SHT_ADDR);
@@ -709,7 +728,7 @@ class AlmemoSenderThread : public concurrency::OSThread
     {
         /* Bustakt zurueckholen, falls ein Fremdtreiber Wire.begin() gerufen hat.
          * Deckt probeSensors(), refreshMux() und buildValues() in einem ab. */
-        almemoI2cClockGuard();
+        almemoI2cBusGuard();
 
         const uint32_t cycleStartMs = millis();
 

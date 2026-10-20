@@ -101,9 +101,12 @@
  * dunkel, auch wenn spaeter alles mit 50 kHz ankommt — und neu initialisiert
  * wird nie, weil die Lib kein ACK prueft.
  *
- * Das Register wird hier DIREKT gesetzt und nicht ueber almemoI2cClockGuard():
+ * Das Register wird hier DIREKT gesetzt und nicht ueber almemoI2cBusGuard():
  * an dieser Stelle ist die Korrektur erwartet und keine Warnung wert, sonst
- * waere die Warnung des Guards wertlos.
+ * waere die Warnung des Guards wertlos. Dasselbe gilt fuer die internen
+ * Pull-ups, die begin() gerade wieder eingeschaltet hat -- auch die Init-
+ * Sequenz soll schon unter den Pegelverhaeltnissen laufen, die nachher gelten
+ * (s. ALMEMO_I2C_INTERNAL_PULLUP).
  */
 class AlmemoSSD1306 : public SSD1306Wire
 {
@@ -116,6 +119,7 @@ class AlmemoSSD1306 : public SSD1306Wire
 #if defined(ARCH_NRF52) && ALMEMO_I2C_FREQUENCY_REG
         NRF_TWIM0->FREQUENCY = ALMEMO_I2C_FREQUENCY_REG;
 #endif
+        almemoI2cPullupGuard();
         return ok;
     }
 };
@@ -159,7 +163,7 @@ class AlmemoOledThread : public concurrency::OSThread
     int32_t runOnce() override
     {
         /* Bustakt zurueckholen, falls ein Fremdtreiber Wire.begin() gerufen hat. */
-        almemoI2cClockGuard();
+        almemoI2cBusGuard();
 
         button.tick();
 

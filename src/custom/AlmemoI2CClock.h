@@ -57,6 +57,30 @@
 #define ALMEMO_I2C_FREQUENCY_REG 0x00C80000UL /* ~48,8 kHz, im Raster (s. o.) */
 #endif
 
+/*
+ * INTERNE PULL-UPS
+ *
+ * Wire_nRF52::begin() setzt sie bedingungslos auf SDA und SCL (~13 kOhm,
+ * Wire_nRF52.cpp:56/62) -- aus demselben Grund wie beim Takt braucht es also
+ * auch hier einen Guard und nicht bloss eine Korrektur beim Start.
+ *
+ * Abschalten ist nur dann richtig, wenn eine EXTERNE Quelle den Bus dauerhaft
+ * hochzieht. Beim D7-OLED-Aufbau ist das der Fall: der Pegelumsetzer
+ * TXS0104E auf dem Adapter zum 5-V-ALMEMO-Bus ist Teil des Geraetes und
+ * bringt eigene 10 kOhm je Seite mit. TI nennt fuer die TXS-Familie
+ * >= 50 kOhm als Untergrenze fuer alles, was zusaetzlich am Bus haengt --
+ * unsere 13 kOhm parallel zu seinen 10 kOhm (und zu den ~10 kOhm des
+ * OLED-Breakouts) ergeben ~3,6 kOhm, also Faktor 14 darunter. Der
+ * Edge-Rate-Accelerator des TXS arbeitet dann gegen den Widerstand.
+ *
+ * 0 = interne Pull-ups aus. Ohne externe Quelle bleibt der Bus damit OHNE
+ * Pull-up liegen und nichts funktioniert mehr -- deshalb per Env gesetzt und
+ * nicht als Projektvorgabe.
+ */
+#ifndef ALMEMO_I2C_INTERNAL_PULLUP
+#define ALMEMO_I2C_INTERNAL_PULLUP 1
+#endif
+
 /* Wer am Takt dreht, tut es meist in jedem Zyklus -- und der Guard sitzt in
  * einem 20-ms-Thread. Also hoechstens so oft eine Warnung. */
 #ifndef ALMEMO_I2C_CLOCK_LOG_MS
@@ -103,4 +127,64 @@ static inline bool almemoI2cClockGuard()
 #else
     return false;
 #endif
+}
+
+/**
+ * Interne Pull-ups von SDA/SCL abschalten, falls sie wieder gesetzt wurden.
+ * Geaendert wird NUR das PULL-Feld -- Richtung, Eingangspuffer und
+ * Treiberstaerke (S0D1, Open Drain) bleiben so, wie Wire sie gesetzt hat.
+ * @return true wenn korrigiert werden musste.
+ */
+static inline bool almemoI2cPullupGuard()
+{
+#if defined(ARCH_NRF52) && !ALMEMO_I2C_INTERNAL_PULLUP && defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
+    const uint8_t pins[2] = {(uint8_t)PIN_WIRE_SDA, (uint8_t)PIN_WIRE_SCL};
+    bool          fixed   = false;
+
+    for (uint8_t i = 0; i < 2; i++) {
+        NRF_GPIO_Type *port = (NRF_GPIO_Type *)digitalPinToPort(pins[i]);
+        const uint32_t mask = digitalPinToBitMask(pins[i]);
+        const uint32_t idx  = (uint32_t)__builtin_ctz(mask);
+
+        uint32_t cnf = port->PIN_CNF[idx];
+        if (((cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == GPIO_PIN_CNF_PULL_Disabled)
+            continue;
+
+        cnf &= ~(uint32_t)GPIO_PIN_CNF_PULL_Msk;
+        cnf |= ((uint32_t)GPIO_PIN_CNF_PULL_Disabled << GPIO_PIN_CNF_PULL_Pos);
+        port->PIN_CNF[idx] = cnf;
+        fixed = true;
+    }
+
+    if (fixed) {
+        /* Gleiche Drosselung wie beim Takt: wer begin() in jedem Zyklus ruft,
+         * wuerde die Log-Ausgabe sonst fluten. */
+        static uint32_t lastLogMs = 0;
+        static uint32_t fixes     = 0;
+        const uint32_t  now       = millis();
+        fixes++;
+        if (lastLogMs == 0 || now - lastLogMs >= ALMEMO_I2C_CLOCK_LOG_MS) {
+            lastLogMs = now ? now : 1;
+            LOG_WARN("AlmemoI2C: interne Pull-ups waren an, abgeschaltet (%lu Korrekturen)",
+                     (unsigned long)fixes);
+        }
+    }
+    return fixed;
+#else
+    return false;
+#endif
+}
+
+/**
+ * Alles zuruecksetzen, was ein fremdes Wire.begin() am Bus verstellt:
+ * Bustakt und interne Pull-ups. Das ist der Einstiegspunkt fuer die
+ * Aufrufstellen -- beide Invarianten gehoeren an dieselben Stellen, naemlich
+ * zwischen die Transaktionen.
+ * @return true wenn irgendetwas korrigiert werden musste.
+ */
+static inline bool almemoI2cBusGuard()
+{
+    const bool clock  = almemoI2cClockGuard();
+    const bool pullup = almemoI2cPullupGuard();
+    return clock || pullup;
 }

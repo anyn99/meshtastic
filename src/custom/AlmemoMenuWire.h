@@ -90,6 +90,26 @@
  * Laenge und Zeiger zusammen machen den Edit von einem reinen Zeiger-Write (2
  * Byte) unterscheidbar -- der Slave braucht also keinen Modus.
  */
+/*
+ * KEIN Drahtformat, sondern Verhalten der MASTER-Seite: so viele
+ * fehlgeschlagene Kopf-Abrufe in Folge gelten als "abgezogen".
+ *
+ * Gemessen: einzelne Transfers auf 0x41 kommen gelegentlich kaputt zurueck,
+ * waehrend 0x50 im selben Moment antwortet -- der Receiver ist also da, nur
+ * dieser eine Lesevorgang war Muell. Unentprellt kostete das zweierlei: das
+ * Display verwarf die Struktur und holte sie mit ~295 ms blockierend neu, und
+ * schlimmer, der Sender hielt den Receiver fuer abgezogen, probte weiter auf
+ * 0x50 und uebernahm sein emuliertes EEPROM als Fuehler -- genau die
+ * Paketschleife, die das Andock-Flag verhindern soll.
+ *
+ * 3 Versuche sind bei 500 ms Poll-Takt (beide Seiten gleich: ALMEMO_OLED_POLL_MS
+ * und ALMEMO_SENDER_PROBE_INTERVAL_MS) rund 1,5 s, bis ein echtes Abziehen
+ * auffaellt. Das ist unkritisch -- es passiert nichts Schlimmes, solange der
+ * Node ihn faelschlich fuer gesteckt haelt: er sendet dann bloss nicht.
+ * Die unsichere Richtung ist damit die sichere.
+ */
+#define ALMEMO_MENU_MISS_LIMIT 3u
+
 #define ALMEMO_MENU_OFF_EDIT 0x1000u
 #define ALMEMO_MENU_EDIT_LEN 7u
 

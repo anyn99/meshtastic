@@ -55,25 +55,22 @@ class AlmemoMenuRemote
      */
     bool poll()
     {
-        almemoI2cClockGuard();
+        almemoI2cBusGuard();
 
         MenuWireHeader h{};
-        if (!readWindow(ALMEMO_MENU_OFF_HEADER, (uint8_t *)&h, sizeof(h)) || h.magic != ALMEMO_MENU_MAGIC) {
-            const bool had = valid;
-            clear();
-            return had;
-        }
+        if (!readWindow(ALMEMO_MENU_OFF_HEADER, (uint8_t *)&h, sizeof(h)) || h.magic != ALMEMO_MENU_MAGIC)
+            return miss("Kopf nicht lesbar");
 
         /* Verträglichkeit: die Struktur kommt ROH, also muessen die Kapazitaeten
          * beider Seiten uebereinstimmen. Siehe AlmemoMenuWire.h. */
         if (h.modelVersion != ALMEMO_MENU_MODEL_VERSION || h.structSize != (uint16_t)sizeof(MenuStruct) ||
             h.pageCount > MENU_MAX_PAGES || h.itemCount > MENU_MAX_ITEMS || h.valueCount > MENU_MAX_VALUES ||
             h.enumCount > MENU_MAX_ENUMS || h.optionCount > MENU_MAX_OPTIONS ||
-            h.numberCount > MENU_MAX_NUMBERS || h.poolLen > MENU_POOL) {
-            const bool had = valid;
-            clear();
-            return had;
-        }
+            h.numberCount > MENU_MAX_NUMBERS || h.poolLen > MENU_POOL)
+            return miss("Kopf unplausibel");
+
+        /* Ab hier war der Kopf gut -- die Entprellung faengt von vorne an. */
+        misses = 0;
 
         bool changed = false;
 
@@ -108,7 +105,7 @@ class AlmemoMenuRemote
      */
     bool apply(const MenuEdit &e)
     {
-        almemoI2cClockGuard();
+        almemoI2cBusGuard();
 
         const uint8_t pkt[ALMEMO_MENU_EDIT_LEN] = {
             (uint8_t)(ALMEMO_MENU_OFF_EDIT >> 8),
@@ -194,6 +191,34 @@ class AlmemoMenuRemote
      * Erst nach bestandener Hash-Pruefung wird nach s kopiert. */
     MenuStruct tmp{};
 
+    /**
+     * Fehlgeschlagener Kopf-Abruf. Erst nach ALMEMO_MENU_MISS_LIMIT Versuchen
+     * in Folge gilt der Receiver als weg -- ein einzelner kaputter Transfer
+     * wuerde sonst die Struktur verwerfen, und der naechste Poll holte sie mit
+     * ~295 ms blockierend neu (s. ALMEMO_MENU_MISS_LIMIT).
+     *
+     * @return true, wenn sich fuer die Anzeige etwas geaendert hat.
+     */
+    bool miss(const char *why)
+    {
+        if (misses < ALMEMO_MENU_MISS_LIMIT)
+            misses++;
+        if (misses < ALMEMO_MENU_MISS_LIMIT) {
+            /* Nur mit Struktur: ohne Receiver scheitert jeder Poll, das waere
+             * bloss Rauschen. Mit Struktur ist genau das die Spur, die den
+             * Glitch sichtbar macht, ohne dass die Anzeige darauf reagiert. */
+            if (valid)
+                LOG_DEBUG("AlmemoMenuRemote: %s (%u/%u), Struktur behalten", why, (unsigned)misses,
+                          (unsigned)ALMEMO_MENU_MISS_LIMIT);
+            return false; /* Anzeige bleibt wie sie ist */
+        }
+        const bool had = valid;
+        clear();
+        return had;
+    }
+
     uint32_t lastHash = 0;
     bool     valid    = false;
+    /* Fehlgeschlagene Kopf-Abrufe in Folge, s. miss(). */
+    uint8_t  misses   = 0;
 };
