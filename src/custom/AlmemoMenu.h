@@ -608,6 +608,13 @@ class MenuController
         const MenuPage &p = s.pages[st.menuPage];
         if (!p.itemCount)
             return false;
+        /* Ein Rebuild kann die Seite verkuerzt haben, seit der Cursor gesetzt
+         * wurde (z.B. faellt das Display-Item weg, wenn der Receiver abgezogen
+         * wird). Der kurze Druck normalisiert ueber "% itemCount", der lange
+         * wuerde hinter das Seitenende greifen und das erste Item der NAECHSTEN
+         * Seite erwischen -- items[] ist durchgehend. */
+        if (st.cursor >= p.itemCount)
+            st.cursor = (uint8_t)(p.itemCount - 1);
         const uint8_t  idx = (uint8_t)(p.firstItem + st.cursor);
         const MenuItem &it = s.items[idx];
 

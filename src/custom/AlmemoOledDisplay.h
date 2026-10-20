@@ -190,6 +190,12 @@ class AlmemoOledThread : public concurrency::OSThread
                     LOG_DEBUG("AlmemoOled: Receiver-Werte aktualisiert (hash %08lx)",
                               (unsigned long)remote.hash());
             }
+
+            /* NACH remote.poll(), damit der Dock-Zustand im selben Durchlauf
+             * ankommt, in dem er sich geaendert hat: das Lokalmenue fuehrt die
+             * Display-Zeilen nur, wenn ueberhaupt ein Receiver steckt. Billig,
+             * der Setter vergleicht nur ein bool. */
+            local.setReceiverPresent(remote.structure() != nullptr);
         }
 
         if (dirty) {

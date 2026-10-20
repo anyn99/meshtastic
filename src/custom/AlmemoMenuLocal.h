@@ -141,6 +141,24 @@ class AlmemoMenuLocal
         poll();
     }
 
+    /**
+     * Dock-Zustand vom Host (s. AlmemoOledDisplay::runOnce).
+     *
+     * Steckt kein Receiver, gibt es nichts umzuschalten -- dann fehlen die
+     * beiden Display-Zeilen ganz. Das ist Teil der STRUKTUR, also muss der
+     * Wechsel einen Rebuild ausloesen; er steckt im Fingerabdruck, und clear()
+     * zieht ihn durch. Werte gehen dabei nicht verloren: steckt ein Receiver,
+     * sendet dieser Node nichts und das Lokalmenue ist ohnehin leer
+     * (s. AlmemoSenderThread::probeSensors).
+     */
+    void setReceiverPresent(bool present)
+    {
+        if (present == receiverPresent)
+            return;
+        receiverPresent = present;
+        clear();
+    }
+
     /** Sensor weg: Werte verwerfen, Struktur auf "Keine Messstellen" stellen. */
     void clear()
     {
@@ -277,6 +295,7 @@ class AlmemoMenuLocal
     uint32_t   lastSendMs      = 0;
     uint32_t   pushedIntervalSecs = 0; /* 0 = noch nichts gesendet */
     uint32_t   lastPackets        = 0; /* ueberlebt rebuild() */
+    bool       receiverPresent    = false; /* s. setReceiverPresent() */
 
     uint16_t offUsb       = MENU_NO_TEXT;
     uint16_t offPreset[16]{};  /* Pool-Offset je Preset-Enumwert */
@@ -299,7 +318,7 @@ class AlmemoMenuLocal
     }
 
     /** Aendert sich nur, wenn die Struktur neu gebaut werden muss. */
-    static uint32_t fingerprint(const AlmemoSensorPacket &pkt, const AlmemoMenuSensorInfo &info)
+    uint32_t fingerprint(const AlmemoSensorPacket &pkt, const AlmemoMenuSensorInfo &info) const
     {
         uint32_t h  = 2166136261u;
         auto     fb = [&h](const void *p, size_t n) {
@@ -317,6 +336,7 @@ class AlmemoMenuLocal
         fb(&info.i2cAddr, 1);
         fb(&info.channels, 1);
         fb(&info.channelsMax, 1);
+        fb(&receiverPresent, 1);
         fb(&pkt.count, 1);
         for (uint8_t i = 0; i < pkt.count && i < ALMEMO_MAX_VALUES; i++) {
             fb(&pkt.values[i].slot, 1);
@@ -375,7 +395,9 @@ class AlmemoMenuLocal
         /* --- Auswahllisten: geteilt mit dem Receiver, s. AlmemoMenuSettings.h --- */
         const uint8_t enumInterval = menudef::intervalEnum(b);
         const uint8_t enumPreset   = menudef::presetEnum(b, offPreset);
-        const uint8_t enumDisplay  = menudef::displayEnum(b);
+        /* Nur mit Receiver: ohne ihn referenziert niemand die Liste, sie
+         * wuerde bloss Pool-Bytes und Option-Plaetze belegen. */
+        const uint8_t enumDisplay  = receiverPresent ? menudef::displayEnum(b) : MENU_NO_IDX;
         const uint8_t numInterval  = menudef::intervalNumber(b);
 
         /* --- Messwert-Seiten ---
@@ -460,17 +482,21 @@ class AlmemoMenuLocal
         /* Toggle: ein Druck schaltet um, ohne Auswahlliste und ohne
          * Bestaetigung. Angezeigt wird das ZIEL, nicht der aktuelle Zustand --
          * den zeigt die Status-Seite. `target` traegt die Optionsliste, aus der
-         * der Host den Text holt (s. AlmemoOledDisplay::renderValues). */
-        b.item("Display ->", VAL_DISPLAY_TARGET, nullptr, MenuItemKind::Toggle, enumDisplay, MENU_NO_IDX, 0,
-               MENU_SETTING_DISPLAY);
+         * der Host den Text holt (s. AlmemoOledDisplay::renderValues).
+         *
+         * Nur mit Receiver: ohne ihn gibt es kein zweites Menue. */
+        if (receiverPresent)
+            b.item("Display ->", VAL_DISPLAY_TARGET, nullptr, MenuItemKind::Toggle, enumDisplay, MENU_NO_IDX, 0,
+                   MENU_SETTING_DISPLAY);
         b.item("<- Zurück", MENU_NO_IDX, nullptr, MenuItemKind::Back);
 
         /* --- Einstellungen: letzte Status-Seite, langer Druck oeffnet das Menue --- */
         b.page("EINSTELLUNGEN", MenuPageKind::Status, MENU_PAGE_OPENS_MENU, pageMenu);
         b.item("Intervall", VAL_INTERVAL);
         b.item("Radio-Mode", VAL_PRESET);
-        b.item("Display", VAL_DISPLAY, nullptr, MenuItemKind::Display, enumDisplay, MENU_NO_IDX, 0,
-               MENU_SETTING_DISPLAY);
+        if (receiverPresent)
+            b.item("Display", VAL_DISPLAY, nullptr, MenuItemKind::Display, enumDisplay, MENU_NO_IDX, 0,
+                   MENU_SETTING_DISPLAY);
         b.item("", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
         b.item("Lang drücken: ändern", MENU_NO_IDX, nullptr, MenuItemKind::Hint);
 
