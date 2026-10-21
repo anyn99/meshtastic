@@ -13,6 +13,7 @@
 
 #include <OneButton.h>
 #include <SSD1306Wire.h>
+#include <Wire.h> /* sendCommand() prueft endTransmission() selbst */
 
 #if defined(ARCH_NRF52)
 #include <nrf.h>
@@ -122,6 +123,59 @@ class AlmemoSSD1306 : public SSD1306Wire
         almemoI2cPullupGuard();
         return ok;
     }
+
+  private:
+    /**
+     * Ersetzt die (private, aber virtuelle) Fassung aus SSD1306Wire, um
+     * endTransmission() AUSZUWERTEN -- die Bibliothek wirft das Ergebnis weg.
+     *
+     * Ohne das ist ein verlorenes Display voellig unsichtbar:
+     * SSD1306Wire::connect() meldet bedingungslos Erfolg (`return true`, ohne
+     * jede Pruefung), also kann init() nicht scheitern, und gehen die
+     * Init-Kommandos verloren, bleibt der Controller unkonfiguriert und der
+     * Schirm dunkel -- ohne eine einzige Spur im Log.
+     *
+     * NUR MELDEN, NICHT EINGREIFEN. Ein automatischer Re-Init stand hier schon
+     * und ist wieder raus: er erzeugt ausgerechnet in dem Moment, in dem der Bus
+     * klemmt, zusaetzlichen Verkehr -- Init-Sequenz plus erzwungenes Vollbild,
+     * blockierend in der Main-Loop-Task.
+     *
+     * Und connect() sollte auch niemand "reparieren", damit es Fehler melden
+     * kann: allocateBuffer() ruft es VOR dem malloc (OLEDDisplay.cpp:69/74). Ein
+     * false beim ersten Aufruf laesst `buffer` auf NULL stehen, und setPixel()
+     * schreibt ungeprueft dorthin (:141) -- also HardFault statt dunklem Schirm.
+     *
+     * initI2cIfNeccesary() fehlt hier absichtlich: _doI2cAutoInit ist false
+     * (SSD1306Wire.h:54), der Aufruf waere ein Wire.begin() pro Kommando und
+     * damit genau das, was Bustakt und Pull-ups zerreisst.
+     *
+     * Geloggt wird nur der WECHSEL: display() schickt sechs Kommandos je
+     * Neuaufbau und der Countdown sorgt fuer mindestens einen Neuaufbau pro
+     * Sekunde -- jede einzelne Meldung waere eine Flut.
+     */
+    void sendCommand(uint8_t command) override
+    {
+        Wire.beginTransmission(ALMEMO_OLED_ADDR);
+        Wire.write(0x80);
+        Wire.write(command);
+
+        if (Wire.endTransmission() != 0) {
+            missed++;
+            if (!silent) {
+                silent = true;
+                LOG_WARN("AlmemoOled: Display @0x%02x ackt nicht (Kommando 0x%02x)",
+                         (unsigned)ALMEMO_OLED_ADDR, (unsigned)command);
+            }
+        } else if (silent) {
+            silent = false;
+            LOG_INFO("AlmemoOled: Display @0x%02x ackt wieder (%lu Kommandos ohne ACK)",
+                     (unsigned)ALMEMO_OLED_ADDR, (unsigned long)missed);
+            missed = 0;
+        }
+    }
+
+    bool     silent = false; /* letzter Zustand, damit nur Wechsel geloggt werden */
+    uint32_t missed = 0;     /* Kommandos ohne ACK seit dem letzten Erfolg */
 };
 
 class AlmemoOledThread : public concurrency::OSThread
