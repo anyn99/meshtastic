@@ -22,6 +22,7 @@ Thumbs.db
 .built
 .context
 .cproject
+.cproject.bak
 .vagrant
 nanopb*
 flash.uf2
