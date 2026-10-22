@@ -9,6 +9,7 @@
 #include "AlmemoMenuSettings.h"
 #include "DisplayFormatters.h"
 #include "NodeDB.h"
+#include "mesh/MeshService.h" /* reloadConfig(), s. applySetting() */
 #include "PowerStatus.h"
 #include "power/PowerHAL.h"
 #include "airtime.h"
@@ -277,7 +278,21 @@ class AlmemoMenuLocal
         case MENU_SETTING_PRESET:
             config.lora.modem_preset = (meshtastic_Config_LoRaConfig_ModemPreset)raw;
             config.lora.use_preset   = true;
-            nodeDB->saveToDisk(SEGMENT_CONFIG);
+            /* reloadConfig() statt saveToDisk(): es macht DREI Dinge, und das
+             * Speichern ist nur das letzte davon --
+             *   nodeDB->resetRadioConfig();           Region/Frequenzslot neu rechnen
+             *   configChanged.notifyObservers(NULL);  Funkmodul uebernimmt die Parameter
+             *   nodeDB->saveToDisk(saveWhat);
+             * Hier stand nur der letzte Schritt, die Einstellung war also
+             * gespeichert, aber das Funkmodul erfuhr nie davon und sendete bis
+             * zum naechsten Einschalten mit den alten Parametern weiter. Von
+             * aussen sieht das aus wie "man muss neu starten" -- ein Neustart
+             * ist aber NICHT noetig: AdminModule setzt fuer LoRa-Aenderungen
+             * ausdruecklich `requiresReboot = false` und verlaesst sich auf
+             * denselben Observer (s. AdminModule.cpp:838). reconfigure() legt
+             * das Radio in Standby, programmiert alle Modem-Parameter neu und
+             * startet den Empfang. */
+            service->reloadConfig(SEGMENT_CONFIG);
             LOG_INFO("AlmemoMenu: Preset -> %s",
                      DisplayFormatters::getModemPresetDisplayName(config.lora.modem_preset, false, true));
             return true;
